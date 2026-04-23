@@ -17,9 +17,10 @@ Vetroscope Cloud. Your data never leaves your network.
 
 ## Status
 
-**Early development.** Phase 1 scaffolding is in place (Fastify +
-SQLite + bootstrap + `/health` + `/server-info`). Auth, sync, and
-published Docker images land in later phases — see
+**Pre-release.** Server implementation is feature-complete against
+the Vetroscope Cloud API surface: setup, auth, sync, user
+management, invites, and an admin CLI. Published Docker images and
+client-side integration in the desktop app land next — see
 [`docs/architecture.md`](docs/architecture.md) for the phased plan.
 
 If you're here looking for a stable release, star the repo and come
@@ -71,10 +72,28 @@ the essentials:
 
 ## Documentation
 
+- [`docs/setup-guide.md`](docs/setup-guide.md) — step-by-step first
+  deployment walkthrough.
+- [`docs/reverse-proxy.md`](docs/reverse-proxy.md) — Caddy,
+  Traefik, nginx, and Cloudflare Tunnel configs.
+- [`docs/troubleshooting.md`](docs/troubleshooting.md) — common
+  issues and how to triage them.
 - [`docs/architecture.md`](docs/architecture.md) — design, data
   schema, API surface, security model, phased plan.
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) — dev setup, style, PR process.
 - [`SECURITY.md`](SECURITY.md) — reporting vulnerabilities.
+
+## Admin CLI
+
+The container ships with `vhs-cli` for operations that need host
+access rather than an API call:
+
+```bash
+docker exec vetroscope-home-sync vhs-cli help
+docker exec vetroscope-home-sync vhs-cli reset-password --email you@home.lan --password 'new-pw'
+docker exec vetroscope-home-sync vhs-cli list-users
+docker exec vetroscope-home-sync vhs-cli rotate-jwt-secret --confirm
+```
 
 ## License
 

@@ -57,6 +57,11 @@ COPY --from=build --chown=vetroscope:vetroscope /app/dist ./dist
 COPY --from=build --chown=vetroscope:vetroscope /app/node_modules ./node_modules
 COPY --from=build --chown=vetroscope:vetroscope /app/package.json ./package.json
 
+# `vhs-cli` is the in-container admin surface; see src/cli/index.ts. The
+# tiny shim keeps `docker exec <container> vhs-cli <subcommand>` short.
+RUN printf '#!/bin/sh\nexec node /app/dist/cli/index.js "$@"\n' > /usr/local/bin/vhs-cli \
+ && chmod +x /usr/local/bin/vhs-cli
+
 RUN mkdir -p /data && chown -R vetroscope:vetroscope /data
 VOLUME ["/data"]
 

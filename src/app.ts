@@ -4,18 +4,26 @@
 // an app against an in-memory DB without touching the network or the
 // filesystem data directory.
 
-import fastify, { type FastifyInstance } from "fastify";
+import fastify, { type FastifyInstance, type preHandlerHookHandler } from "fastify";
 
 import type { DB } from "./db.js";
 import type { Config } from "./env.js";
+import { buildAuthenticate, requireRole } from "./middleware/auth.js";
+import { adminRoutes } from "./routes/admin.js";
+import { authRoutes } from "./routes/auth.js";
 import { buildHealthRoutes } from "./routes/health.js";
 import { buildServerInfoRoutes } from "./routes/server-info.js";
+import { setupRoutes } from "./routes/setup.js";
+import { syncRoutes } from "./routes/sync.js";
+import { userRoutes } from "./routes/user.js";
 
 declare module "fastify" {
   interface FastifyInstance {
     db: DB;
     config: Config;
     jwtSecret: string;
+    authenticate: preHandlerHookHandler;
+    requireAdmin: preHandlerHookHandler;
   }
 }
 
@@ -55,9 +63,16 @@ export async function buildApp({
   app.decorate("db", db);
   app.decorate("config", config);
   app.decorate("jwtSecret", jwtSecret);
+  app.decorate("authenticate", buildAuthenticate());
+  app.decorate("requireAdmin", requireRole("admin"));
 
   await app.register(buildHealthRoutes(config));
   await app.register(buildServerInfoRoutes(config));
+  await app.register(setupRoutes);
+  await app.register(authRoutes);
+  await app.register(userRoutes);
+  await app.register(syncRoutes);
+  await app.register(adminRoutes);
 
   app.setErrorHandler((error: Error & { statusCode?: number; code?: string }, request, reply) => {
     request.log.error({ err: error }, "request failed");
