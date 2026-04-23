@@ -19,13 +19,17 @@ WORKDIR /app
 
 # Install deps in a layer the lockfile invalidates, not the source. Keep
 # scripts enabled so better-sqlite3 compiles against this image's Node.
+# `scripts/` is copied alongside package.json because npm's `prepare`
+# lifecycle invokes scripts/install-git-hooks.mjs during `npm ci` — the
+# script itself no-ops in a non-git context (Docker build has no .git),
+# but the file needs to exist for `node` to load it.
 COPY package.json package-lock.json ./
+COPY scripts ./scripts
 RUN npm ci
 
 # Copy only what tsc + copy-assets need.
 COPY tsconfig.json tsconfig.build.json ./
 COPY src ./src
-COPY scripts ./scripts
 RUN npm run build
 
 # Strip dev deps for the runtime copy. `npm prune --omit=dev` keeps the
