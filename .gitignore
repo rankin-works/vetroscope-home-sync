@@ -49,3 +49,6 @@ temp/
 # Coverage
 coverage/
 *.lcov
+
+# Agent guide — local reference only; contains private filesystem paths
+CLAUDE.md
