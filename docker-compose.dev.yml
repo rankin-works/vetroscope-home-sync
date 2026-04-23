@@ -1,0 +1,21 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Development / CI harness. Builds the image from the local Dockerfile
+# instead of pulling from GHCR, and mounts ./data for inspection.
+
+services:
+  vetroscope-home-sync:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: vetroscope-home-sync:dev
+    container_name: vetroscope-home-sync-dev
+    restart: "no"
+    ports:
+      - "4437:4437"
+    environment:
+      VS_SERVER_NAME: "Home Sync (dev)"
+      VS_LOG_LEVEL: "debug"
+      VS_ALLOW_REGISTRATION: "open"
+    volumes:
+      - ./data:/data

@@ -1,0 +1,21 @@
+#!/bin/sh
+# SPDX-License-Identifier: Apache-2.0
+#
+# Reject commit messages that contain `Co-Authored-By: Claude` trailers.
+# Public git history on this repo should show the human developer(s) only;
+# AI-assisted work is fine but doesn't show up in commit metadata.
+# See CLAUDE.md § "No Claude trailers in commits".
+
+msg_file="$1"
+if [ -z "$msg_file" ] || [ ! -f "$msg_file" ]; then
+  exit 0
+fi
+
+if grep -qiE '^Co-Authored-By:[[:space:]]*Claude' "$msg_file"; then
+  printf '\n\033[31merror\033[0m: commit message contains a "Co-Authored-By: Claude" trailer.\n'
+  printf '       This repository forbids Claude trailers on commits — please remove it.\n'
+  printf '       (See CLAUDE.md § "No Claude trailers in commits".)\n\n'
+  exit 1
+fi
+
+exit 0

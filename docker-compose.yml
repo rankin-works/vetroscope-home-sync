@@ -1,0 +1,33 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Starter Docker Compose for Vetroscope Home Sync. Copy-paste this into
+# your NAS / homelab stack, adjust the volume mount to a path on your
+# host, and `docker compose up -d`.
+#
+# First boot prints a one-time setup code to the container logs:
+#   docker compose logs vetroscope-home-sync
+#
+# TLS: this template runs plain HTTP on the LAN. For internet exposure,
+# put Caddy / Traefik / nginx in front or set VS_TLS_CERT + VS_TLS_KEY.
+
+services:
+  vetroscope-home-sync:
+    image: ghcr.io/rankin-works/vetroscope-home-sync:latest
+    container_name: vetroscope-home-sync
+    restart: unless-stopped
+    ports:
+      - "4437:4437"
+    environment:
+      VS_SERVER_NAME: "Home Sync"
+      # VS_ALLOW_REGISTRATION: "invite"   # open | invite | closed
+      # VS_MAX_DEVICES_PER_USER: "10"
+      # VS_LOG_LEVEL: "info"
+      # VS_TLS_CERT: /certs/server.crt
+      # VS_TLS_KEY:  /certs/server.key
+    volumes:
+      - vetroscope-data:/data
+      # - /mnt/nas/vetroscope:/data        # or a bind mount to your NAS
+      # - /mnt/nas/certs:/certs:ro         # if you're terminating TLS here
+
+volumes:
+  vetroscope-data:
