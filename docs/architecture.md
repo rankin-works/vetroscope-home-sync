@@ -725,7 +725,7 @@ proprietary in the private Vetroscope repo.
   setup guide (when it's written), link back to vetroscope.com
 - `CONTRIBUTING.md` — PR process, code style, commit message format
 - `CODE_OF_CONDUCT.md` — Contributor Covenant boilerplate
-- `SECURITY.md` — private disclosure channel (security@vetroscope.com),
+- `SECURITY.md` — private disclosure channel (support@vetroscope.com),
   supported versions, expected response time
 - `.github/workflows/` — CI (lint, typecheck, tests) and the Docker
   publish pipeline building multi-arch images to GHCR

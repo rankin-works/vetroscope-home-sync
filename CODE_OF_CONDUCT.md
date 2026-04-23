@@ -10,5 +10,5 @@ level, background, or the shape of their homelab.
 ## Reporting
 
 If you see behavior that violates the Code of Conduct, please email
-**conduct@vetroscope.com**. Reports are handled confidentially by the
+**support@vetroscope.com**. Reports are handled confidentially by the
 project maintainers.

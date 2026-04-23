@@ -16,7 +16,7 @@ Once 1.0 ships, we'll support the current minor and the one before it.
 
 Please **do not** open a public GitHub issue for security bugs.
 
-Instead, email **security@vetroscope.com** with:
+Instead, email **support@vetroscope.com** with:
 
 - A description of the issue and the impact you believe it has.
 - Steps to reproduce (or a proof-of-concept) if you have one.
@@ -43,7 +43,7 @@ Out of scope:
   encrypts sensitive fields client-side, but the threat model assumes
   the host itself is trusted by its operator.
 - Vulnerabilities in reverse proxies, Docker itself, or the host OS.
-- The Vetroscope desktop client — those go to `security@vetroscope.com`
+- The Vetroscope desktop client — those go to `support@vetroscope.com`
   with a note that it's a client issue.
 
 ## Hardening recommendations

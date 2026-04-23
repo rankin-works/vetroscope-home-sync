@@ -137,6 +137,6 @@ you're upgrading from.
 ## Getting help
 
 - **Bugs / feature requests:** GitHub issues on this repo.
-- **Security issues:** `security@vetroscope.com` — see
+- **Security issues:** `support@vetroscope.com` — see
   [SECURITY.md](../SECURITY.md).
-- **Conduct concerns:** `conduct@vetroscope.com`.
+- **Conduct concerns:** `support@vetroscope.com`.
