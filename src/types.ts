@@ -88,9 +88,15 @@ export interface SyncGoal {
   uuid: string;
   type: string;
   app_name: string | null;
+  // tag_uuid carries the cross-device tag reference for tag-based goals.
+  // Optional because pre-002 servers don't surface it on pull.
+  tag_uuid?: string | null;
   target_seconds: number;
   enabled: number;
   deleted: number;
+  // First-write-wins creation timestamp. Used by the goal detail modal to
+  // scope "days met" / streaks / heatmap to days after the goal existed.
+  created_at?: string | null;
   updated_at: string;
 }
 

@@ -91,16 +91,33 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
     );
 
     const upsertGoal = stmts.prepare<
-      [string, string, string, string | null, number, number, number, string]
+      [
+        string,
+        string,
+        string,
+        string | null,
+        string | null,
+        number,
+        number,
+        number,
+        string | null,
+        string,
+      ]
     >(
-      `INSERT INTO sync_goals (uuid, user_id, type, app_name, target_seconds, enabled, deleted, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      // tag_uuid + created_at land in 002_sync_goals_extras.sql. created_at
+      // uses COALESCE so a later push that omits it (e.g. an older client)
+      // can't clobber the original creation timestamp recorded by the
+      // first device to push the goal.
+      `INSERT INTO sync_goals (uuid, user_id, type, app_name, tag_uuid, target_seconds, enabled, deleted, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(uuid) DO UPDATE SET
          type = excluded.type,
          app_name = excluded.app_name,
+         tag_uuid = excluded.tag_uuid,
          target_seconds = excluded.target_seconds,
          enabled = excluded.enabled,
          deleted = excluded.deleted,
+         created_at = COALESCE(sync_goals.created_at, excluded.created_at),
          updated_at = excluded.updated_at
        WHERE excluded.updated_at > sync_goals.updated_at`,
     );
@@ -237,9 +254,11 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
           userId,
           g.type,
           g.app_name,
+          g.tag_uuid ?? null,
           g.target_seconds,
           g.enabled,
           g.deleted,
+          g.created_at ?? null,
           g.updated_at || now,
         );
       }
@@ -342,7 +361,7 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
 
     const goals = fastify.db
       .prepare<[string, string, number], SyncGoal>(
-        `SELECT uuid, type, app_name, target_seconds, enabled, deleted, updated_at
+        `SELECT uuid, type, app_name, tag_uuid, target_seconds, enabled, deleted, created_at, updated_at
          FROM sync_goals
          WHERE user_id = ? AND updated_at > ?
          ORDER BY updated_at ASC
