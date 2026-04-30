@@ -35,6 +35,12 @@ import type {
 const BATCH_SIZE = 500;
 const ICON_LIMIT = 50;
 const OVERRIDE_PULL_LIMIT = 500;
+// Settings are a small allowlist (see SYNCED_SETTING_KEYS) so the legacy
+// behavior was "no LIMIT" — it always fit in one response. With the
+// compound cursor we still cap to a deterministic page size so a future
+// allowlist expansion can't turn this into an unbounded scan, but the cap
+// is comfortable above the current keyset.
+const SETTING_LIMIT = 100;
 
 // Allowlist of sync-eligible setting keys. The client has historically
 // attempted to push additional keys; rejecting unknown ones keeps the
@@ -389,15 +395,37 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
       )
       .all(userId, cursor, BATCH_SIZE);
 
-    const icons = fastify.db
-      .prepare<[string, string], SyncIcon>(
-        `SELECT name_hash, app_name, platform, data_url, dominant_color, updated_at
-         FROM sync_icons
-         WHERE user_id = ? AND updated_at > ?
-         ORDER BY updated_at ASC
-         LIMIT ${ICON_LIMIT}`,
-      )
-      .all(userId, cursor);
+    // Icons use a compound (updated_at, name_hash) cursor instead of the
+    // shared time-only cursor. A single client push of N icons stamps every
+    // row in the batch with the same `Date.now()`-resolution timestamp, so
+    // strict-greater-than pagination on `updated_at` alone will skip rows
+    // that share the boundary timestamp on the next pull. The compound form
+    // breaks ties on the row's natural unique key (`name_hash`).
+    //
+    // When the client doesn't send `icon_cursor` (older builds, or first
+    // pull after upgrade) we fall back to the shared time-only cursor for
+    // a clean transition — that path matches the legacy behavior exactly.
+    const iconCursor = body.icon_cursor;
+    const icons = iconCursor
+      ? fastify.db
+          .prepare<[string, string, string, string], SyncIcon>(
+            `SELECT name_hash, app_name, platform, data_url, dominant_color, updated_at
+             FROM sync_icons
+             WHERE user_id = ?
+               AND (updated_at > ? OR (updated_at = ? AND name_hash > ?))
+             ORDER BY updated_at ASC, name_hash ASC
+             LIMIT ${ICON_LIMIT}`,
+          )
+          .all(userId, iconCursor.updated_at, iconCursor.updated_at, iconCursor.key)
+      : fastify.db
+          .prepare<[string, string], SyncIcon>(
+            `SELECT name_hash, app_name, platform, data_url, dominant_color, updated_at
+             FROM sync_icons
+             WHERE user_id = ? AND updated_at > ?
+             ORDER BY updated_at ASC, name_hash ASC
+             LIMIT ${ICON_LIMIT}`,
+          )
+          .all(userId, cursor);
 
     // Overrides are intentionally returned in full (not cursor-filtered)
     // — see the cloud Worker comment, the client relies on LWW to dedupe.
@@ -411,14 +439,32 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
       )
       .all(userId);
 
-    const settings = fastify.db
-      .prepare<[string, string], SyncSetting>(
-        `SELECT key, value, updated_at
-         FROM sync_settings
-         WHERE user_id = ? AND updated_at > ?
-         ORDER BY updated_at ASC`,
-      )
-      .all(userId, cursor);
+    // Settings have the same shared-timestamp hazard as icons — a single
+    // bulk update (e.g. a Reset Cloud Data → re-push flow) can stamp every
+    // setting with the same `now`. Same compound-cursor treatment, with
+    // `key` as the tiebreaker. There's no LIMIT on the legacy fallback so
+    // existing behavior is preserved when a client doesn't send
+    // `setting_cursor`.
+    const settingCursor = body.setting_cursor;
+    const settings = settingCursor
+      ? fastify.db
+          .prepare<[string, string, string, string], SyncSetting>(
+            `SELECT key, value, updated_at
+             FROM sync_settings
+             WHERE user_id = ?
+               AND (updated_at > ? OR (updated_at = ? AND key > ?))
+             ORDER BY updated_at ASC, key ASC
+             LIMIT ${SETTING_LIMIT}`,
+          )
+          .all(userId, settingCursor.updated_at, settingCursor.updated_at, settingCursor.key)
+      : fastify.db
+          .prepare<[string, string], SyncSetting>(
+            `SELECT key, value, updated_at
+             FROM sync_settings
+             WHERE user_id = ? AND updated_at > ?
+             ORDER BY updated_at ASC, key ASC`,
+          )
+          .all(userId, cursor);
 
     fastify.db
       .prepare<[string, string, string]>(
@@ -426,23 +472,45 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
       )
       .run(now, auth.device_id, userId);
 
-    const hitLimit =
+    // Time-cursor types: entries, tags, goals, markers, achievements.
+    // Icons + settings are governed by their own compound cursors and
+    // tracked separately so the time cursor doesn't have to lie about
+    // their state.
+    const hitLimitTimeTypes =
       entries.length >= BATCH_SIZE ||
       tags.length >= BATCH_SIZE ||
       goals.length >= BATCH_SIZE ||
       markers.length >= BATCH_SIZE ||
-      achievements.length >= BATCH_SIZE ||
-      icons.length >= ICON_LIMIT;
+      achievements.length >= BATCH_SIZE;
+    const hitLimitIcons = icons.length >= ICON_LIMIT;
+    const hitLimitSettings = settings.length >= SETTING_LIMIT;
 
     let newCursor = now;
-    if (hitLimit) {
-      const latestPerType = [entries, tags, goals, markers, achievements, icons]
+    if (hitLimitTimeTypes) {
+      const latestPerType = [entries, tags, goals, markers, achievements]
         .filter((arr) => arr.length > 0)
         .map((arr) => (arr as Array<{ updated_at: string }>)[arr.length - 1]!.updated_at);
       if (latestPerType.length > 0) {
         newCursor = latestPerType.sort()[0]!;
       }
     }
+
+    // Compound cursors for icons / settings — only emitted when that
+    // table actually paginated (response was truncated). The client
+    // round-trips them on the next pull. Absence means "this type is
+    // fully drained at this snapshot."
+    const nextIconCursor = hitLimitIcons && icons.length > 0
+      ? {
+          updated_at: icons[icons.length - 1]!.updated_at,
+          key: icons[icons.length - 1]!.name_hash,
+        }
+      : undefined;
+    const nextSettingCursor = hitLimitSettings && settings.length > 0
+      ? {
+          updated_at: settings[settings.length - 1]!.updated_at,
+          key: settings[settings.length - 1]!.key,
+        }
+      : undefined;
 
     const response: PullResponse = {
       entries,
@@ -454,7 +522,9 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
       overrides,
       settings,
       cursor: newCursor,
-      has_more: hitLimit,
+      has_more: hitLimitTimeTypes || hitLimitIcons || hitLimitSettings,
+      ...(nextIconCursor ? { icon_cursor: nextIconCursor } : {}),
+      ...(nextSettingCursor ? { setting_cursor: nextSettingCursor } : {}),
     };
     return reply.send(response);
   });

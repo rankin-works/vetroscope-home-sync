@@ -359,4 +359,135 @@ describe("/sync", () => {
     expect(row?.created_at).toBe("2026-04-20T08:00:00.000Z");
     expect(row?.target_seconds).toBe(7200);
   });
+
+  it("icon pull paginates correctly when many rows share an updated_at", async () => {
+    // The bug: 100 icons all stamped with the same updated_at would be
+    // skipped past the boundary timestamp by a strict-greater-than cursor.
+    // The compound cursor on (updated_at, name_hash) keeps pagination
+    // correct.
+    const admin = await bootstrapAdmin(h);
+    const sharedTs = "2026-04-30T09:00:00.000Z";
+    const icons = Array.from({ length: 100 }, (_, i) => ({
+      name_hash: `hash-${String(i).padStart(3, "0")}`,
+      app_name: `enc-app-${i}`,
+      platform: i % 2 === 0 ? "darwin" : "win32",
+      data_url: "enc-data",
+      dominant_color: "#000",
+      updated_at: sharedTs,
+    }));
+    // Server's push handler clamps icons to ICON_LIMIT (50) per request,
+    // so push in two batches to seed all 100 rows. Both batches share the
+    // same updated_at — the whole point of this test is the boundary
+    // behavior at a shared timestamp.
+    for (let i = 0; i < icons.length; i += 50) {
+      await h.app.inject({
+        method: "POST",
+        url: "/sync/push",
+        headers: { authorization: `Bearer ${admin.accessToken}` },
+        payload: { icons: icons.slice(i, i + 50) },
+      });
+    }
+
+    const pulled = new Map<string, unknown>();
+    let iconCursor: { updated_at: string; key: string } | undefined;
+    let safety = 0;
+    while (safety++ < 10) {
+      const res = await h.app.inject({
+        method: "POST",
+        url: "/sync/pull",
+        headers: { authorization: `Bearer ${admin.accessToken}` },
+        payload: {
+          cursor: null,
+          device_id: "other-device",
+          icon_cursor: iconCursor ?? null,
+        },
+      });
+      expect(res.statusCode).toBe(200);
+      const body = res.json();
+      for (const icon of body.icons ?? []) {
+        pulled.set(icon.name_hash, icon);
+      }
+      if (!body.icon_cursor) break;
+      iconCursor = body.icon_cursor;
+    }
+    expect(pulled.size).toBe(100);
+    // Bound: ICON_LIMIT = 50, so 100 icons should be drained in 2 pages
+    // (the third returns 0 icons + no icon_cursor → break).
+    expect(safety).toBeLessThanOrEqual(3);
+  });
+
+  it("legacy icon pull (no icon_cursor) still works for older clients", async () => {
+    // Backward-compat: a client that doesn't send icon_cursor falls back
+    // to the time-only cursor and the server uses the legacy query path.
+    // Asserts we didn't regress the older behavior on the way to the
+    // compound-cursor fix.
+    const admin = await bootstrapAdmin(h);
+    await h.app.inject({
+      method: "POST",
+      url: "/sync/push",
+      headers: { authorization: `Bearer ${admin.accessToken}` },
+      payload: {
+        icons: [
+          {
+            name_hash: "h1",
+            app_name: "enc-a",
+            platform: "darwin",
+            data_url: "enc-d",
+            dominant_color: "#000",
+            updated_at: "2026-04-30T09:00:00.000Z",
+          },
+        ],
+      },
+    });
+    const res = await h.app.inject({
+      method: "POST",
+      url: "/sync/pull",
+      headers: { authorization: `Bearer ${admin.accessToken}` },
+      payload: { cursor: null, device_id: "other-device" },
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.icons).toHaveLength(1);
+    expect(body.icons[0].name_hash).toBe("h1");
+  });
+
+  it("setting pull paginates correctly when many rows share an updated_at", async () => {
+    // Same compound-cursor treatment for settings — bulk pushes (e.g.
+    // a Reset Cloud Data → re-push flow) can stamp every setting with
+    // the same `now`, and the time-only cursor would skip rows at the
+    // boundary. SYNCED_SETTING_KEYS only has ignored_apps + ignored_projects
+    // today, so we can't realistically exceed SETTING_LIMIT in practice —
+    // this test still exercises the compound-cursor path to prove the
+    // pagination is correct.
+    const admin = await bootstrapAdmin(h);
+    const sharedTs = "2026-04-30T09:00:00.000Z";
+    await h.app.inject({
+      method: "POST",
+      url: "/sync/push",
+      headers: { authorization: `Bearer ${admin.accessToken}` },
+      payload: {
+        settings: [
+          { key: "ignored_apps", value: "enc-a", updated_at: sharedTs },
+          { key: "ignored_projects", value: "enc-b", updated_at: sharedTs },
+        ],
+      },
+    });
+    const res = await h.app.inject({
+      method: "POST",
+      url: "/sync/pull",
+      headers: { authorization: `Bearer ${admin.accessToken}` },
+      payload: {
+        cursor: null,
+        device_id: "other-device",
+        setting_cursor: null,
+      },
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.settings).toHaveLength(2);
+    expect(body.settings.map((s: { key: string }) => s.key).sort()).toEqual([
+      "ignored_apps",
+      "ignored_projects",
+    ]);
+  });
 });

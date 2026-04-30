@@ -5,4 +5,4 @@
 // always have a deterministic version even if the package.json bump is
 // missed. Bump here AND in package.json when cutting a release.
 
-export const VERSION = "0.1.0-beta.3";
+export const VERSION = "0.1.0-beta.4";

@@ -157,9 +157,28 @@ export interface PushPayload {
   settings?: SyncSetting[];
 }
 
+// Compound cursor for tables where rows commonly share an `updated_at`
+// (icons, settings — see icon-sync-fix-plan in the private repo). The
+// secondary key is the row's natural unique key and acts as a tiebreaker
+// at a timestamp boundary so strict-greater-than pagination doesn't drop
+// rows that share the boundary timestamp. Optional in payloads so older
+// clients (without compound-cursor awareness) still work — pre-fix
+// servers fall back to legacy `updated_at`-only cursors.
+export interface CompoundCursor {
+  updated_at: string;
+  // Natural key of the last row returned. For icons this is `name_hash`;
+  // for settings this is `key`.
+  key: string;
+}
+
 export interface PullPayload {
   cursor: string | null;
   device_id: string;
+  // Per-type compound cursors. Sent by clients that understand the
+  // compound-cursor protocol (v0.1.0-beta.4+). Servers ignore unknown
+  // fields, so older servers reject nothing.
+  icon_cursor?: CompoundCursor | null;
+  setting_cursor?: CompoundCursor | null;
 }
 
 export interface PullResponse {
@@ -173,4 +192,10 @@ export interface PullResponse {
   settings: SyncSetting[];
   cursor: string;
   has_more?: boolean;
+  // Set by v0.1.0-beta.4+ servers when icons / settings were paginated.
+  // The client round-trips them on the next pull. Absent when the
+  // table's response wasn't truncated (server returned everything in
+  // one shot) or when the server predates the fix.
+  icon_cursor?: CompoundCursor;
+  setting_cursor?: CompoundCursor;
 }
