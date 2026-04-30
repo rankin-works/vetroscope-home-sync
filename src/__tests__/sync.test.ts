@@ -272,4 +272,91 @@ describe("/sync", () => {
     });
     expect(res.statusCode).toBe(401);
   });
+
+  it("goal push round-trips tag_uuid and created_at", async () => {
+    const admin = await bootstrapAdmin(h);
+    const goal = {
+      uuid: "g-tagged",
+      type: "tag",
+      app_name: null,
+      tag_uuid: "tag-abc",
+      target_seconds: 3600,
+      enabled: 1,
+      deleted: 0,
+      created_at: "2026-04-20T08:00:00.000Z",
+      updated_at: "2026-04-20T08:00:00.000Z",
+    };
+    const push = await h.app.inject({
+      method: "POST",
+      url: "/sync/push",
+      headers: { authorization: `Bearer ${admin.accessToken}` },
+      payload: { goals: [goal] },
+    });
+    expect(push.statusCode).toBe(200);
+
+    const pull = await h.app.inject({
+      method: "POST",
+      url: "/sync/pull",
+      headers: { authorization: `Bearer ${admin.accessToken}` },
+      payload: { cursor: null, device_id: "other-device" },
+    });
+    expect(pull.statusCode).toBe(200);
+    const rows = pull.json().goals as Array<typeof goal>;
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.tag_uuid).toBe("tag-abc");
+    expect(rows[0]!.created_at).toBe("2026-04-20T08:00:00.000Z");
+  });
+
+  it("goal upsert preserves the original created_at (first-write-wins)", async () => {
+    const admin = await bootstrapAdmin(h);
+    await h.app.inject({
+      method: "POST",
+      url: "/sync/push",
+      headers: { authorization: `Bearer ${admin.accessToken}` },
+      payload: {
+        goals: [
+          {
+            uuid: "g-fww",
+            type: "app",
+            app_name: "Cursor",
+            tag_uuid: null,
+            target_seconds: 3600,
+            enabled: 1,
+            deleted: 0,
+            created_at: "2026-04-20T08:00:00.000Z",
+            updated_at: "2026-04-20T08:00:00.000Z",
+          },
+        ],
+      },
+    });
+    // Second push from a re-installed client that lost its created_at.
+    // The COALESCE in the upsert should keep the original timestamp.
+    await h.app.inject({
+      method: "POST",
+      url: "/sync/push",
+      headers: { authorization: `Bearer ${admin.accessToken}` },
+      payload: {
+        goals: [
+          {
+            uuid: "g-fww",
+            type: "app",
+            app_name: "Cursor",
+            tag_uuid: null,
+            target_seconds: 7200,
+            enabled: 1,
+            deleted: 0,
+            created_at: null,
+            updated_at: "2026-04-21T08:00:00.000Z",
+          },
+        ],
+      },
+    });
+    const row = h.db
+      .prepare<[string], { created_at: string | null; target_seconds: number }>(
+        "SELECT created_at, target_seconds FROM sync_goals WHERE uuid = ?",
+      )
+      .get("g-fww");
+    expect(row?.created_at).toBe("2026-04-20T08:00:00.000Z");
+    expect(row?.target_seconds).toBe(7200);
+  });
 });

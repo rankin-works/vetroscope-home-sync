@@ -47,9 +47,12 @@ ARG GID=10001
 RUN addgroup -S -g ${GID} vetroscope \
  && adduser  -S -u ${UID} -G vetroscope -s /sbin/nologin vetroscope
 
-# `curl` is only used by the HEALTHCHECK below. ~1.5 MB, worth the budget
-# for a baked-in probe that doesn't require the caller to know our shape.
-RUN apk add --no-cache curl tini
+# `curl` is the HEALTHCHECK probe; `sqlite` is the admin/backup CLI the
+# setup-guide already points users at (e.g. `docker exec … sqlite3
+# /data/sync.db ".backup …"`); `tini` is the init that reaps zombies and
+# forwards signals. ~3 MB total, worth the budget for first-class admin
+# ergonomics on a self-hosted box.
+RUN apk add --no-cache curl tini sqlite
 
 WORKDIR /app
 ENV NODE_ENV=production \

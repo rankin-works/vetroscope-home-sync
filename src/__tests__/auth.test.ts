@@ -30,6 +30,10 @@ describe("auth flow", () => {
     expect(body.accessToken).toBeTruthy();
     expect(body.refreshToken).toBeTruthy();
     expect(body.user.email).toBe("admin@test.lan");
+    // Multi-target clients cache refresh_expires_at on the target
+    // descriptor; ensure every login returns it as an ISO timestamp.
+    expect(body.refresh_expires_at).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    expect(new Date(body.refresh_expires_at).getTime()).toBeGreaterThan(Date.now());
   });
 
   it("login rejects bad password", async () => {
@@ -56,6 +60,10 @@ describe("auth flow", () => {
       payload: { refresh_token: admin.refreshToken },
     });
     expect(first.statusCode).toBe(200);
+    // Refresh response also carries refresh_expires_at so multi-target
+    // clients can update the per-target descriptor's cached expiry on
+    // every rotation, not just on initial login.
+    expect(first.json().refresh_expires_at).toMatch(/^\d{4}-\d{2}-\d{2}T/);
     const second = await h.app.inject({
       method: "POST",
       url: "/auth/refresh",

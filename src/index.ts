@@ -43,11 +43,15 @@ async function main(): Promise<void> {
     const bar = "═".repeat(55);
     process.stdout.write(
       `[home-sync] ${bar}\n` +
-        `[home-sync]   First boot detected. Set up your server at:\n` +
-        `[home-sync]     http://<your-host>:${config.port}/setup\n` +
+        `[home-sync]   First boot detected.\n` +
         `[home-sync]\n` +
         `[home-sync]   Setup code: ${bootstrap.setupToken}\n` +
         `[home-sync]   (One-time. Will not appear in future logs.)\n` +
+        `[home-sync]\n` +
+        `[home-sync]   Use this code to bootstrap the admin account from\n` +
+        `[home-sync]   your Vetroscope client (Settings → Sync → Add target\n` +
+        `[home-sync]   → Home Sync) or by POSTing to /setup. See\n` +
+        `[home-sync]   docs/setup-guide.md for the full walkthrough.\n` +
         `[home-sync] ${bar}\n`,
     );
   }

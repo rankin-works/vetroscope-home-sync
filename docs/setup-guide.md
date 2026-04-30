@@ -74,17 +74,18 @@ The response includes a `user` object with `role: "admin"`. Once the
 bootstrap admin is created, `/setup` returns `410 Gone` on any
 further request.
 
-> **Prefer the GUI?** The Vetroscope client (v0.3+) will walk you
-> through this wizard-style from Settings → Sync → Home Sync, so you
-> never have to touch curl. This guide exists for users who want to
+> **Prefer the GUI?** The Vetroscope client (v0.3+) walks you through
+> this wizard-style from Settings → Sync → **Add sync target** → Home
+> Sync, so you never have to touch curl. This guide exists for users
+> who want to
 > pre-flight the server before connecting a client.
 
 ## 4. Connect the Vetroscope client
 
 On a Licensed or Pro client:
 
-1. Open **Settings → Sync**.
-2. Select **Home Sync**.
+1. Open **Settings → Sync** and click **Add sync target**.
+2. Choose **Home Sync**.
 3. Paste `https://<host-ip>:4437` (or `http://` if you haven't wired
    up TLS yet — OK for LAN, never for the open internet).
 4. Click **Continue**. The client hits `/health` and `/server-info`;
@@ -94,15 +95,17 @@ On a Licensed or Pro client:
    Cloud recovery code, paste it here to re-use the same E2E key.
 7. First sync kicks off automatically.
 
-You should see **Connected · 1 device · Last sync just now** in
-Settings → Sync.
+You should see **Home Sync · Synced just now** in Settings → Sync,
+alongside any other targets you have bound (Cloud, etc.). Home Sync
+runs in parallel with Cloud — adding one does not disable the other.
 
 ## 5. Invite another device or user
 
 ### Same account, additional device
 
-On the second device, open Settings → Sync → Home Sync and sign in
-with the same email/password. The server enforces the configured
+On the second device, open Settings → Sync → Add sync target → Home
+Sync and sign in with the same email/password. The server enforces
+the configured
 device cap (`VS_MAX_DEVICES_PER_USER`, default 10).
 
 ### Additional user (household/small team)
@@ -150,6 +153,8 @@ docker exec vetroscope-home-sync \
 ```
 
 which writes a consistent point-in-time snapshot to `sync.db.bak`.
+The `sqlite3` CLI is bundled in the runtime image as of `v0.1.0-beta.3`,
+so the command above works out of the box — no `apk add` step required.
 
 ## Common next steps
 
