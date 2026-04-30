@@ -25,6 +25,12 @@ export interface IssuedTokens {
   accessToken: string;
   refreshToken: string;
   expiresIn: number;
+  // ISO timestamp of when the refresh token expires. Multi-target sync
+  // clients cache this on each target descriptor (Phase C of the
+  // multi-target rollout) so the per-target refresh logic doesn't drift
+  // off a stale value. Snake-case to match the rest of the auth payload's
+  // *_at fields and to mirror what the cloud server returns.
+  refresh_expires_at: string;
 }
 
 export async function issueTokens(
@@ -71,6 +77,7 @@ export async function issueTokens(
     accessToken,
     refreshToken,
     expiresIn: ACCESS_TOKEN_EXPIRY_SECONDS,
+    refresh_expires_at: expiresAt,
   };
 }
 
