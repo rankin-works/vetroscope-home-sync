@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="color-scheme" content="dark" />
+    <meta name="theme-color" content="#000000" />
+    <title>Vetroscope · Home</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%2306b6d4'/%3E%3Ccircle cx='16' cy='16' r='6' fill='none' stroke='%23000' stroke-width='2.5'/%3E%3Cline x1='21' y1='21' x2='26' y2='26' stroke='%23000' stroke-width='2.5' stroke-linecap='round'/%3E%3C/svg%3E" />
+    <link rel="stylesheet" href="/assets/style.css" />
+  </head>
+  <body>
+    <div id="root" data-state="boot">
+      <!-- Boot splash. Keeps the page from flashing white before JS attaches. -->
+      <div class="boot">
+        <div class="boot__mark" aria-hidden="true"></div>
+      </div>
+
+      <!-- Lock screen. Shown when no session or sync key in memory. -->
+      <section class="lock" hidden>
+        <div class="lock__shell">
+          <div class="lock__brand">
+            <span class="lock__brand-mark" aria-hidden="true"></span>
+            <span class="lock__brand-word">Vetroscope</span>
+            <span class="lock__brand-tag">Home</span>
+          </div>
+          <h1 class="lock__title">
+            Open your <em>archive</em>
+          </h1>
+          <p class="lock__lede">
+            Your data is encrypted on this server. Sign in, then enter your recovery code so this browser can decrypt it locally — keys never leave the page.
+          </p>
+          <form class="lock__form" id="lock-form" autocomplete="off">
+            <label class="field">
+              <span class="field__label">Email</span>
+              <input type="email" name="email" required autocomplete="email" inputmode="email" />
+            </label>
+            <label class="field">
+              <span class="field__label">Password</span>
+              <input type="password" name="password" required autocomplete="current-password" />
+            </label>
+            <label class="field">
+              <span class="field__label">Recovery code</span>
+              <input type="text" name="recovery" required autocomplete="off" spellcheck="false" placeholder="ABCD-EFGH-JKLM-NPQR" />
+              <span class="field__hint">Four groups of four. From Vetroscope → Settings → Sync → Recovery.</span>
+            </label>
+            <div class="lock__error" id="lock-error" hidden></div>
+            <button type="submit" class="btn btn--primary lock__submit">
+              <span class="btn__label">Unlock</span>
+              <span class="btn__spinner" aria-hidden="true"></span>
+            </button>
+          </form>
+          <footer class="lock__foot">
+            <span class="dot dot--sky"></span>
+            <span id="lock-server-name">connecting…</span>
+          </footer>
+        </div>
+        <div class="lock__atmosphere" aria-hidden="true">
+          <div class="lock__grid"></div>
+          <div class="lock__halo"></div>
+        </div>
+      </section>
+
+      <!-- App shell. Hidden until unlocked. -->
+      <div class="app" hidden>
+        <button class="hamburger" id="hamburger" aria-label="Open menu" aria-expanded="false">
+          <span></span><span></span><span></span>
+        </button>
+
+        <aside class="sidebar" id="sidebar">
+          <div class="sidebar__head">
+            <a href="#/dashboard" class="sidebar__brand" data-collapsed-hide="false">
+              <span class="sidebar__brand-mark" aria-hidden="true"></span>
+              <span class="sidebar__brand-text">
+                <span class="sidebar__brand-word">Vetroscope</span>
+                <span class="sidebar__brand-tag" id="sidebar-plan">Home</span>
+              </span>
+            </a>
+            <button class="sidebar__toggle" id="sidebar-toggle" aria-label="Collapse sidebar">
+              <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M10 4 L6 8 L10 12" />
+              </svg>
+            </button>
+          </div>
+
+          <nav class="sidebar__nav" aria-label="Primary">
+            <a href="#/dashboard" class="navlink" data-route="dashboard">
+              <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <rect x="3" y="3" width="7" height="9" rx="1.4" />
+                <rect x="14" y="3" width="7" height="5" rx="1.4" />
+                <rect x="14" y="12" width="7" height="9" rx="1.4" />
+                <rect x="3" y="16" width="7" height="5" rx="1.4" />
+              </svg>
+              <span class="navlink__text">Dashboard</span>
+            </a>
+            <a href="#/charts" class="navlink" data-route="charts">
+              <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M3 20 L9 13 L13 16 L21 6" />
+                <path d="M15 6 H21 V12" />
+              </svg>
+              <span class="navlink__text">Charts</span>
+            </a>
+            <a href="#/activity" class="navlink" data-route="activity">
+              <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M3 12 H7 L9 6 L13 18 L15 12 H21" />
+              </svg>
+              <span class="navlink__text">Activity</span>
+            </a>
+            <a href="#/devices" class="navlink" data-route="devices">
+              <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <rect x="4" y="5" width="16" height="11" rx="1.5" />
+                <path d="M2 19 H22" />
+                <path d="M9 16 V19" />
+                <path d="M15 16 V19" />
+              </svg>
+              <span class="navlink__text">Devices</span>
+            </a>
+          </nav>
+
+          <div class="sidebar__section">
+            <span class="eyebrow">Devices</span>
+            <ul class="devices" id="sidebar-devices">
+              <li class="devices__empty">no devices yet</li>
+            </ul>
+          </div>
+
+          <div class="sidebar__foot">
+            <div class="me">
+              <span class="me__avatar" id="me-avatar">·</span>
+              <span class="me__text">
+                <span class="me__name" id="me-name">·</span>
+                <span class="me__email" id="me-email">·</span>
+              </span>
+            </div>
+            <button class="iconbtn" id="logout" title="Sign out" aria-label="Sign out">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M15 12 H3 M7 8 L3 12 L7 16" />
+                <path d="M11 5 H19 V19 H11" />
+              </svg>
+            </button>
+          </div>
+        </aside>
+
+        <div class="backdrop" id="backdrop"></div>
+
+        <main class="main">
+          <header class="topbar">
+            <div class="topbar__title">
+              <span class="topbar__crumb" id="topbar-crumb">Dashboard</span>
+              <h1 class="topbar__head" id="topbar-head">Today, at a glance</h1>
+            </div>
+            <div class="topbar__tools">
+              <div class="period" role="tablist" aria-label="Time period" id="period">
+                <button data-period="today" role="tab">Today</button>
+                <button data-period="7d" role="tab" class="is-active">7d</button>
+                <button data-period="30d" role="tab">30d</button>
+                <button data-period="90d" role="tab">90d</button>
+                <button data-period="all" role="tab">All</button>
+              </div>
+              <button class="iconbtn iconbtn--ghost" id="refresh" title="Refresh data" aria-label="Refresh">
+                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M4 12 a8 8 0 0 1 14-5.3" />
+                  <path d="M18 3 V7 H14" />
+                  <path d="M20 12 a8 8 0 0 1 -14 5.3" />
+                  <path d="M6 21 V17 H10" />
+                </svg>
+              </button>
+            </div>
+          </header>
+
+          <section class="page" id="page"></section>
+        </main>
+      </div>
+    </div>
+
+    <script type="module" src="/assets/app.js"></script>
+  </body>
+</html>

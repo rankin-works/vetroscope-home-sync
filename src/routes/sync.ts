@@ -68,14 +68,19 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
         string | null,
         string | null,
         number,
+        number,
         string | null,
         string | null,
         string,
       ]
     >(
-      `INSERT INTO sync_entries (uuid, user_id, device_id, timestamp, app_name, window_title, project, is_adobe, tag_uuid, platform, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      // is_passive (003) refreshes on conflict — same rationale as
+      // tag_uuid and platform: a later push may carry a corrected
+      // classification that should overwrite an older one.
+      `INSERT INTO sync_entries (uuid, user_id, device_id, timestamp, app_name, window_title, project, is_adobe, is_passive, tag_uuid, platform, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(uuid) DO UPDATE SET
+         is_passive = excluded.is_passive,
          tag_uuid = excluded.tag_uuid,
          platform = excluded.platform,
          updated_at = excluded.updated_at
@@ -238,6 +243,7 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
           e.window_title,
           e.project,
           e.is_adobe,
+          e.is_passive ?? 0,
           e.tag_uuid,
           e.platform ?? null,
           e.updated_at || now,
@@ -347,7 +353,7 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
 
     const entries = fastify.db
       .prepare<[string, string, string, number], SyncEntry>(
-        `SELECT uuid, device_id, timestamp, app_name, window_title, project, is_adobe, tag_uuid, platform, updated_at
+        `SELECT uuid, device_id, timestamp, app_name, window_title, project, is_adobe, is_passive, tag_uuid, platform, updated_at
          FROM sync_entries
          WHERE user_id = ? AND updated_at > ? AND device_id != ?
          ORDER BY updated_at ASC

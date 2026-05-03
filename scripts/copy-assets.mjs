@@ -10,14 +10,20 @@ import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, "..");
-const from = resolve(repoRoot, "src", "migrations");
-const to = resolve(repoRoot, "dist", "migrations");
 
-if (!existsSync(from)) {
-  console.error(`[copy-assets] source missing: ${from}`);
-  process.exit(1);
+const targets = [
+  ["src/migrations", "dist/migrations"],
+  ["src/public", "dist/public"],
+];
+
+for (const [src, dst] of targets) {
+  const from = resolve(repoRoot, src);
+  const to = resolve(repoRoot, dst);
+  if (!existsSync(from)) {
+    console.error(`[copy-assets] source missing: ${from}`);
+    process.exit(1);
+  }
+  mkdirSync(to, { recursive: true });
+  cpSync(from, to, { recursive: true });
+  console.log(`[copy-assets] ${from} → ${to}`);
 }
-
-mkdirSync(to, { recursive: true });
-cpSync(from, to, { recursive: true });
-console.log(`[copy-assets] ${from} → ${to}`);

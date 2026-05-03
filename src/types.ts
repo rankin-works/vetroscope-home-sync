@@ -70,6 +70,11 @@ export interface SyncEntry {
   window_title: string | null;
   project: string | null;
   is_adobe: number;
+  // 1 = away-listening / background sample (e.g. music playing while
+  // another app is focused). Excluded from active-time totals on
+  // dashboards and charts. Pre-003 servers don't have this column —
+  // pulled rows from older schemas come back as 0 by default.
+  is_passive?: number;
   tag_uuid: string | null;
   platform: string | null;
   updated_at: string;
