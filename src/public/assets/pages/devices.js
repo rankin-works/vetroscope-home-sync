@@ -31,6 +31,27 @@ export function renderDevices(container, state) {
     };
   });
 
+  // Surface registered devices that don't have any entries — they
+  // appear in the devices table (e.g. legacy "Vetroscope Web" rows from
+  // pre-beta.7 browsers) but never pushed anything. The user wants to
+  // see + clean these up just like orphan entry-ids.
+  const stillNeedingShow = new Set(state.devices.map((d) => d.id));
+  for (const e of enriched) stillNeedingShow.delete(e.device_id);
+  for (const id of stillNeedingShow) {
+    const reg = registered.get(id);
+    enriched.push({
+      device_id: id,
+      entry_count: 0,
+      passive_count: 0,
+      first_ts: null,
+      last_ts: null,
+      seconds: 0,
+      registered: reg ?? null,
+      orphan: false,
+      empty: true,
+    });
+  }
+
   const totalSeconds = enriched.reduce((acc, d) => acc + d.seconds, 0);
   const totalPassive = enriched.reduce((acc, d) => acc + d.passive_count, 0);
   const orphans = enriched.filter((d) => d.orphan);
@@ -150,10 +171,52 @@ function buildDeviceRow(d) {
     drop.innerHTML = `<span class="btn__label">Drop ${d.entry_count.toLocaleString()} entries</span><span class="btn__spinner"></span>`;
     drop.addEventListener("click", () => onDrop(d, drop));
     right.appendChild(drop);
+  } else if (d.registered) {
+    // Allow removing any registered device that isn't the current
+    // session. The server refuses to unlink the current device anyway,
+    // so we just hide the button on it.
+    const isCurrent = d.registered.is_current === true;
+    if (!isCurrent) {
+      const remove = document.createElement("button");
+      remove.className = "btn btn--ghost";
+      remove.style.cssText = "padding:6px 11px;font-size:12px;color:var(--text-secondary);";
+      remove.innerHTML = `<span class="btn__label">Remove device</span><span class="btn__spinner"></span>`;
+      remove.addEventListener("click", () => onRemoveDevice(d, remove));
+      right.appendChild(remove);
+    }
   }
 
   row.append(dot, id, platform, entries, range, right);
   return row;
+}
+
+async function onRemoveDevice(d, btn) {
+  const label = d.registered?.device_name || d.device_id;
+  const ok = window.confirm(
+    `Remove "${label}" from this server?\n\n` +
+    `This deletes the device row and its refresh tokens. Any synced ` +
+    `data already on the server stays. Useful for cleaning up old web ` +
+    `sessions that were registered as devices in earlier versions.`,
+  );
+  if (!ok) return;
+  btn.dataset.loading = "true";
+  btn.disabled = true;
+  try {
+    const tokens = JSON.parse(sessionStorage.getItem("vhs:tokens") ?? "{}");
+    const res = await fetch(`/user/devices/${encodeURIComponent(d.device_id)}`, {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${tokens.access_token ?? ""}` },
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => null);
+      throw new Error(body?.message ?? body?.error ?? `HTTP ${res.status}`);
+    }
+    location.reload();
+  } catch (err) {
+    alert(`Failed: ${err?.message ?? err}`);
+    btn.dataset.loading = "false";
+    btn.disabled = false;
+  }
 }
 
 async function onDrop(d, btn) {

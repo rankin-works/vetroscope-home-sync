@@ -56,6 +56,12 @@ export interface JWTPayload {
   plan: Plan;
   role: Role;
   device_id: string;
+  // "sync" tokens belong to a real device row in `devices` and can push
+  // / pull entries. "web" tokens are issued to the browser dashboard,
+  // do NOT have a device row, and are rejected by /sync/* routes.
+  // Optional for back-compat with tokens issued before 004 — absent
+  // means "sync" (the legacy default).
+  scope?: "sync" | "web";
   iat: number;
   exp: number;
 }

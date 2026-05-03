@@ -49,6 +49,20 @@ const SYNCED_SETTING_KEYS = new Set(["ignored_apps", "ignored_projects"]);
 
 export const syncRoutes: FastifyPluginAsync = async (fastify) => {
   fastify.addHook("preHandler", fastify.authenticate);
+  // Web tokens (scope="web") are read-only; refuse to let them push
+  // or pull through the sync API. Legacy tokens with no `scope` field
+  // are treated as sync (the historical default), so existing desktop
+  // sessions keep working without a re-login.
+  fastify.addHook("preHandler", async (request, reply) => {
+    const scope = (request.authUser as JWTPayload | undefined)?.scope;
+    if (scope === "web") {
+      return reply.status(403).send({
+        error: "web_token_forbidden",
+        message: "Web sessions cannot push or pull sync data.",
+      });
+    }
+    return undefined;
+  });
 
   fastify.post<{ Body: PushPayload }>("/sync/push", async (request, reply) => {
     const auth = request.authUser as JWTPayload;

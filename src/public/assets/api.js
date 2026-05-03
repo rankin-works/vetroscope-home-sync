@@ -82,7 +82,7 @@ async function request(path, init = {}, retry = true) {
 
 export const api = {
   serverInfo: () => request("/server-info"),
-  login: (body) => request("/auth/login", { method: "POST", body }),
+  webLogin: (body) => request("/auth/web-login", { method: "POST", body }),
   logout: () => request("/auth/logout", { method: "POST" }),
   profile: () => request("/user/profile"),
   syncKey: () => request("/user/sync-key"),
@@ -93,18 +93,23 @@ export const api = {
     const qs = q.toString();
     return request(`/web/snapshot${qs ? `?${qs}` : ""}`);
   },
+  removeDevice: (id) => request(`/user/devices/${encodeURIComponent(id)}`, { method: "DELETE" }),
 };
 
 export { ApiError };
 
-// Stable device id per browser. Lets us re-auth without claiming a new
-// "device" slot every refresh — a single web session bound to one device row.
-const DEVICE_KEY = "vhs:web-device-id";
-export function getOrCreateDeviceId() {
-  let id = localStorage.getItem(DEVICE_KEY);
+// Stable per-browser session id. Sent to /auth/web-login so refresh
+// rotations between tabs of the same browser don't kick each other.
+// Stored in localStorage (not session) so a page reload reuses the
+// same id and shares one refresh-token slot. Web sessions do *not*
+// register a row in the devices table — this id only identifies a
+// session for refresh-token bookkeeping.
+const SESSION_KEY = "vhs:web-session-id";
+export function getOrCreateSessionId() {
+  let id = localStorage.getItem(SESSION_KEY);
   if (!id) {
     id = (crypto.randomUUID?.() ?? `web-${Date.now()}-${Math.random().toString(16).slice(2)}`);
-    localStorage.setItem(DEVICE_KEY, id);
+    localStorage.setItem(SESSION_KEY, id);
   }
   return id;
 }

@@ -4,7 +4,7 @@
 // page rendering. Hash-based router so SPA refresh works on any path
 // without server cooperation.
 
-import { api, tokenStore, getOrCreateDeviceId, ApiError } from "./api.js";
+import { api, tokenStore, getOrCreateSessionId, ApiError } from "./api.js";
 import { cryptoBackend, decryptField, decryptMany, unwrapKey, clearKeyCache } from "./crypto.js";
 import { getState, setState, subscribe } from "./state.js";
 import { renderDashboard } from "./pages/dashboard.js";
@@ -104,18 +104,16 @@ async function onLockSubmit(ev) {
   submitBtn.disabled = true;
 
   try {
-    const deviceId = getOrCreateDeviceId();
-    const session = await api.login({
+    const sessionId = getOrCreateSessionId();
+    const session = await api.webLogin({
       email: data.email,
       password: data.password,
-      device_id: deviceId,
-      device_name: "Vetroscope Web",
-      platform: "web",
+      session_id: sessionId,
     });
     tokenStore.set({
       access_token: session.accessToken ?? session.access_token,
       refresh_token: session.refreshToken ?? session.refresh_token,
-      device_id: session.device_id,
+      session_id: session.session_id,
     });
 
     // Fetch wrapped sync key
@@ -389,14 +387,17 @@ function renderInner(state) {
     meAvatar.textContent = (state.user.display_name || state.user.email || "·").trim().slice(0, 1).toUpperCase();
   }
 
-  // sidebar devices
+  // sidebar devices — hide platform=web rows. Web sessions don't push
+  // data; they're viewers, not sync sources. Show them on the Devices
+  // page where management lives, not in the persistent sidebar.
   const devicesEl = document.getElementById("sidebar-devices");
+  const sidebarDevices = state.devices.filter((d) => d.platform !== "web");
   if (devicesEl) {
     devicesEl.innerHTML = "";
-    if (state.devices.length === 0) {
+    if (sidebarDevices.length === 0) {
       devicesEl.innerHTML = `<li class="devices__empty">no devices yet</li>`;
     } else {
-      for (const d of state.devices) {
+      for (const d of sidebarDevices) {
         const li = document.createElement("li");
         li.className = "devices__row";
         li.innerHTML = `
