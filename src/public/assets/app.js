@@ -5,7 +5,7 @@
 // without server cooperation.
 
 import { api, tokenStore, getOrCreateDeviceId, ApiError } from "./api.js";
-import { decryptField, decryptMany, unwrapKey, clearKeyCache } from "./crypto.js";
+import { cryptoBackend, decryptField, decryptMany, unwrapKey, clearKeyCache } from "./crypto.js";
 import { getState, setState, subscribe } from "./state.js";
 import { renderDashboard } from "./pages/dashboard.js";
 import { renderCharts } from "./pages/charts.js";
@@ -33,12 +33,13 @@ document.addEventListener("DOMContentLoaded", () => boot());
 async function boot() {
   // Show server name on lock screen ASAP — hits unauthenticated endpoint.
   const serverNameEl = document.getElementById("lock-server-name");
+  const backendSuffix = cryptoBackend === "noble" ? " · pure-js crypto" : "";
   api.serverInfo().then((info) => {
     if (info?.server_name) {
-      serverNameEl.textContent = `${info.server_name} · v${info.version ?? "?"}`;
+      serverNameEl.textContent = `${info.server_name} · v${info.version ?? "?"}${backendSuffix}`;
     }
   }).catch(() => {
-    serverNameEl.textContent = "server unreachable";
+    serverNameEl.textContent = `server unreachable${backendSuffix}`;
   });
 
   const tokens = tokenStore.get();

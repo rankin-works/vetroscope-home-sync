@@ -1,14 +1,32 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// WebCrypto port of the Vetroscope client-side encryption scheme.
-// Mirrors electron/encryption.ts so the desktop app and this browser
-// agree byte-for-byte. The server never sees plaintext or the sync key.
+// WebCrypto port of the Vetroscope client-side encryption scheme,
+// with a pure-JS fallback so the page works on plain http://<lan-ip>
+// in addition to https://. Mirrors electron/encryption.ts so the
+// desktop and the browser agree byte-for-byte. The server never sees
+// plaintext or the sync key in either path.
 //
-//  • AES-256-GCM, 12-byte IV, 16-byte auth tag (GCM default).
+//  • AES-256-GCM, 12-byte IV, 16-byte auth tag.
 //  • PBKDF2-SHA256, 100k iterations, 32-byte salt → 32-byte wrapping key.
 //  • Recovery code is normalized: dashes stripped, uppercased.
 //  • Field ciphertext (hex): IV || authTag || ciphertext.
 //  • Wrapped key  (hex): salt || IV || authTag || ciphertext.
+//
+// Why a fallback exists: browsers gate `crypto.subtle` to "secure
+// contexts" (HTTPS or localhost). A self-hosted Home Sync running on
+// http://192.168.x.y or http://<tailscale-ip>:4437 doesn't qualify, so
+// `crypto.subtle` is `undefined` and every AES call would fail. We
+// detect the gap up front and route through @noble/ciphers + @noble/
+// hashes (vendored under ./vendor/) when WebCrypto isn't available.
+// Both libraries are MIT-licensed; their LICENSE files ride along.
+//
+// Performance: pure-JS AES-GCM is ~5–20× slower than the native path,
+// but with the per-ciphertext cache in decryptMany the practical hit
+// on a typical Home Sync dataset is a couple of seconds, not minutes.
+
+import { gcm } from "./vendor/ciphers/aes.js";
+import { pbkdf2Async } from "./vendor/hashes/pbkdf2.js";
+import { sha256 } from "./vendor/hashes/sha2.js";
 
 const PBKDF2_ITERATIONS = 100_000;
 const KEY_LENGTH_BYTES = 32;
@@ -18,6 +36,13 @@ const SALT_LENGTH = 32;
 
 const enc = new TextEncoder();
 const dec = new TextDecoder();
+
+const HAS_WEBCRYPTO =
+  typeof crypto !== "undefined" &&
+  typeof crypto.subtle !== "undefined" &&
+  typeof crypto.subtle.importKey === "function";
+
+export const cryptoBackend = HAS_WEBCRYPTO ? "webcrypto" : "noble";
 
 export function hexToBytes(hex) {
   const len = hex.length / 2;
@@ -40,31 +65,61 @@ function normalizeRecovery(code) {
   return code.replace(/-/g, "").toUpperCase();
 }
 
-async function deriveWrappingKey(recoveryCode, salt) {
-  const baseKey = await crypto.subtle.importKey(
-    "raw",
-    enc.encode(normalizeRecovery(recoveryCode)),
-    { name: "PBKDF2" },
-    false,
-    ["deriveBits"],
-  );
-  const bits = await crypto.subtle.deriveBits(
-    {
-      name: "PBKDF2",
-      salt,
-      iterations: PBKDF2_ITERATIONS,
-      hash: "SHA-256",
-    },
-    baseKey,
-    KEY_LENGTH_BYTES * 8,
-  );
-  return crypto.subtle.importKey(
-    "raw",
-    bits,
-    { name: "AES-GCM" },
-    false,
-    ["decrypt"],
-  );
+// — Wrapping key derivation (PBKDF2-SHA256) —
+async function deriveWrappingKeyBytes(recoveryCode, salt) {
+  const password = enc.encode(normalizeRecovery(recoveryCode));
+  if (HAS_WEBCRYPTO) {
+    const baseKey = await crypto.subtle.importKey(
+      "raw",
+      password,
+      { name: "PBKDF2" },
+      false,
+      ["deriveBits"],
+    );
+    const bits = await crypto.subtle.deriveBits(
+      {
+        name: "PBKDF2",
+        salt,
+        iterations: PBKDF2_ITERATIONS,
+        hash: "SHA-256",
+      },
+      baseKey,
+      KEY_LENGTH_BYTES * 8,
+    );
+    return new Uint8Array(bits);
+  }
+  return pbkdf2Async(sha256, password, salt, {
+    c: PBKDF2_ITERATIONS,
+    dkLen: KEY_LENGTH_BYTES,
+  });
+}
+
+// — AES-GCM decrypt —
+//
+// Both backends expect the AEAD ciphertext + auth tag concatenated as
+// a single buffer. The on-wire layout writes the auth tag *before* the
+// ciphertext (matching Node's `cipher.getAuthTag()` returned separately
+// then concat'd ahead of `encrypted`), so the caller shuffles them
+// before handing off.
+async function aesGcmDecrypt(keyBytes, iv, ciphertextWithTag) {
+  if (HAS_WEBCRYPTO) {
+    const key = await crypto.subtle.importKey(
+      "raw",
+      keyBytes,
+      { name: "AES-GCM" },
+      false,
+      ["decrypt"],
+    );
+    const plain = await crypto.subtle.decrypt(
+      { name: "AES-GCM", iv },
+      key,
+      ciphertextWithTag,
+    );
+    return new Uint8Array(plain);
+  }
+  // noble's gcm() returns a cipher object with decrypt(ct||tag).
+  // Throws on auth-tag mismatch, same as WebCrypto's OperationError.
+  return gcm(keyBytes, iv).decrypt(ciphertextWithTag);
 }
 
 // Unwrap (decrypt) the encryption key using the recovery code.
@@ -74,50 +129,31 @@ export async function unwrapKey(wrappedHex, recoveryCode) {
     const data = hexToBytes(wrappedHex);
     const salt = data.slice(0, SALT_LENGTH);
     const iv = data.slice(SALT_LENGTH, SALT_LENGTH + IV_LENGTH);
-    // WebCrypto's AES-GCM expects the auth tag appended to the ciphertext —
-    // so we hand it everything from the end of the IV onward, which matches
-    // the Node `crypto.createDecipheriv`-style layout (authTag then ciphertext)
-    // because the on-disk format is salt | iv | authTag | ciphertext.
-    const tagAndCipher = data.slice(SALT_LENGTH + IV_LENGTH);
-    // Node's GCM produces (ciphertext, authTag) separately but the Vetroscope
-    // wire format writes authTag *first*, then ciphertext. WebCrypto needs
-    // the reverse: ciphertext + tag concatenated. Shuffle them.
-    const authTag = tagAndCipher.slice(0, AUTH_TAG_LENGTH);
-    const ciphertext = tagAndCipher.slice(AUTH_TAG_LENGTH);
+    const authTag = data.slice(SALT_LENGTH + IV_LENGTH, SALT_LENGTH + IV_LENGTH + AUTH_TAG_LENGTH);
+    const ciphertext = data.slice(SALT_LENGTH + IV_LENGTH + AUTH_TAG_LENGTH);
     const recombined = new Uint8Array(ciphertext.length + authTag.length);
     recombined.set(ciphertext, 0);
     recombined.set(authTag, ciphertext.length);
 
-    const wrappingKey = await deriveWrappingKey(recoveryCode, salt);
-    const plain = await crypto.subtle.decrypt(
-      { name: "AES-GCM", iv },
-      wrappingKey,
-      recombined,
-    );
-    return bytesToHex(new Uint8Array(plain));
+    const wrappingKey = await deriveWrappingKeyBytes(recoveryCode, salt);
+    const plain = await aesGcmDecrypt(wrappingKey, iv, recombined);
+    return bytesToHex(plain);
   } catch {
     return null;
   }
 }
 
-let cachedSyncKey = null;
+let cachedSyncKeyBytes = null;
 let cachedSyncKeyHex = null;
 
-async function importSyncKey(syncKeyHex) {
-  if (cachedSyncKeyHex === syncKeyHex && cachedSyncKey !== null) {
-    return cachedSyncKey;
+async function getSyncKeyBytes(syncKeyHex) {
+  if (cachedSyncKeyHex === syncKeyHex && cachedSyncKeyBytes !== null) {
+    return cachedSyncKeyBytes;
   }
   const raw = hexToBytes(syncKeyHex);
-  const key = await crypto.subtle.importKey(
-    "raw",
-    raw,
-    { name: "AES-GCM" },
-    false,
-    ["decrypt"],
-  );
-  cachedSyncKey = key;
+  cachedSyncKeyBytes = raw;
   cachedSyncKeyHex = syncKeyHex;
-  return key;
+  return raw;
 }
 
 // Decrypt one field ciphertext. Returns the original value on failure
@@ -139,12 +175,8 @@ export async function decryptField(encryptedHex, syncKeyHex) {
     recombined.set(ciphertext, 0);
     recombined.set(authTag, ciphertext.length);
 
-    const key = await importSyncKey(syncKeyHex);
-    const plain = await crypto.subtle.decrypt(
-      { name: "AES-GCM", iv },
-      key,
-      recombined,
-    );
+    const keyBytes = await getSyncKeyBytes(syncKeyHex);
+    const plain = await aesGcmDecrypt(keyBytes, iv, recombined);
     return dec.decode(plain);
   } catch {
     return encryptedHex;
@@ -155,16 +187,19 @@ export async function decryptField(encryptedHex, syncKeyHex) {
 // Caches identical ciphertexts (highly redundant — the same app_name
 // gets stamped onto every entry) and runs decryption in parallel batches
 // so the browser doesn't block on tens of thousands of sequential
-// WebCrypto round-trips. Progress callback fires after every batch so
-// the lock screen can show "decrypting 12,300 / 50,000".
+// crypto round-trips. Progress callback fires after every batch so the
+// lock screen can show "decrypting 12,300 / 50,000".
 export async function decryptMany(values, syncKeyHex, opts = {}) {
-  const { onProgress = null, batchSize = 512 } = opts;
+  // Smaller default batch on the noble path — the work is CPU-bound on
+  // the main thread, so larger batches just delay the next paint without
+  // improving throughput. On WebCrypto the work is in a worker thread so
+  // bigger batches are fine.
+  const defaultBatch = HAS_WEBCRYPTO ? 512 : 128;
+  const { onProgress = null, batchSize = defaultBatch } = opts;
   const cache = new Map();
   const results = new Array(values.length);
 
-  // Find unique non-null ciphertexts to decrypt once each, then fan
-  // results back out across positions.
-  const uniqueIndices = new Map(); // ciphertext → first index encountered
+  const uniqueIndices = new Map();
   for (let i = 0; i < values.length; i++) {
     const v = values[i];
     if (v == null) { results[i] = v; continue; }
@@ -181,7 +216,6 @@ export async function decryptMany(values, syncKeyHex, opts = {}) {
     for (let j = 0; j < slice.length; j++) cache.set(slice[j], decoded[j]);
     completed += slice.length;
     if (onProgress) onProgress(completed, uniqueList.length);
-    // yield to the event loop so the UI can paint a progress update
     if (start + batchSize < uniqueList.length) {
       await new Promise((r) => setTimeout(r, 0));
     }
@@ -195,6 +229,6 @@ export async function decryptMany(values, syncKeyHex, opts = {}) {
 }
 
 export function clearKeyCache() {
-  cachedSyncKey = null;
+  cachedSyncKeyBytes = null;
   cachedSyncKeyHex = null;
 }

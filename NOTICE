@@ -11,3 +11,18 @@ Portions of this software were adapted from internal Vetroscope source
 code (password hashing primitives, JWT helpers, SQL schema shapes)
 originally authored by the Vetroscope maintainers and re-licensed under
 Apache-2.0 for inclusion in this public repository.
+
+This product bundles third-party JavaScript libraries under
+src/public/assets/vendor/, used by the bundled web UI for AES-GCM and
+PBKDF2 when the browser's WebCrypto API is unavailable (e.g. plain
+http:// origins on a LAN deployment):
+
+  • @noble/ciphers (https://github.com/paulmillr/noble-ciphers)
+    Copyright (c) 2023 Paul Miller
+    Licensed under the MIT License — see
+    src/public/assets/vendor/ciphers/LICENSE.
+
+  • @noble/hashes (https://github.com/paulmillr/noble-hashes)
+    Copyright (c) 2022 Paul Miller
+    Licensed under the MIT License — see
+    src/public/assets/vendor/hashes/LICENSE.
