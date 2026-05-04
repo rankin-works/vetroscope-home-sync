@@ -18,7 +18,7 @@ import {
 
 export function renderCharts(container, state) {
   container.innerHTML = "";
-  const all = filterActive(state.entries, { ignoredApps: state.ignoredApps, ignoredProjects: state.ignoredProjects });
+  const all = filterActive(state.entries, { ignoredApps: state.ignoredApps, ignoredProjects: state.ignoredProjects, ignoredBreakdownPatterns: state.ignoredBreakdownPatterns });
   const interval = POLL_INTERVAL_SECONDS;
   const inPeriod = filterByPeriod(all, state.period);
 

@@ -123,10 +123,10 @@ export const webRoutes: FastifyPluginAsync = async (fastify) => {
         )
         .all(userId);
 
-      // ignored_apps + ignored_projects are stored encrypted by the
-      // desktop client. Surface them so the web UI can decrypt and
-      // honor them in active-time totals (matches the desktop's
-      // ${ignoredFilter} clause).
+      // ignored_apps + ignored_projects + ignored_breakdown_patterns are
+      // stored encrypted by the desktop client. Surface them so the web UI
+      // can decrypt and honor them in active-time totals (matches the
+      // desktop's ${ignoredFilter} clause).
       const settings = fastify.db
         .prepare<[string], { key: string; value: string; updated_at: string }>(
           `SELECT key, value, updated_at

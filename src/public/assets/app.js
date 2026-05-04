@@ -175,10 +175,12 @@ async function loadEverything(onStatus = null) {
   const goalApps = await decryptMany(rawGoals.map((g) => g.app_name), syncKey);
   for (let i = 0; i < rawGoals.length; i++) rawGoals[i].app_name = goalApps[i];
 
-  // ignored_apps / ignored_projects come back as encrypted JSON blobs.
-  // Decrypt + parse, then index as Sets so per-entry filtering is O(1).
+  // ignored_apps / ignored_projects / ignored_breakdown_patterns come back
+  // as encrypted JSON blobs. Decrypt + parse, then index as Sets (or keep
+  // as an array for the pattern matcher) so per-entry filtering is fast.
   const ignoredApps = new Set();
   const ignoredProjects = new Set();
+  let ignoredBreakdownPatterns = [];
   for (const setting of snapshot.settings ?? []) {
     if (!setting.value) continue;
     const plain = await decryptField(setting.value, syncKey);
@@ -187,6 +189,11 @@ async function loadEverything(onStatus = null) {
     if (!Array.isArray(list)) continue;
     if (setting.key === "ignored_apps") for (const a of list) ignoredApps.add(a);
     else if (setting.key === "ignored_projects") for (const p of list) ignoredProjects.add(p);
+    else if (setting.key === "ignored_breakdown_patterns") {
+      ignoredBreakdownPatterns = list.filter(
+        (p) => p && typeof p.appName === "string" && typeof p.pattern === "string" && p.pattern.length > 0,
+      );
+    }
   }
 
   const tagsById = new Map();
@@ -244,6 +251,7 @@ async function loadEverything(onStatus = null) {
     overridesByHash,
     ignoredApps,
     ignoredProjects,
+    ignoredBreakdownPatterns,
     snapshot,
     entries: decrypted,
     ready: true,

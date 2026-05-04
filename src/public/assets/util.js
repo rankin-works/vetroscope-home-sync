@@ -79,14 +79,26 @@ export function inferSampleInterval() {
 // the user has explicitly ignored. Mirrors the desktop's
 // `${ACTIVE_ONLY}${ignoredFilter}` SQL clauses.
 //
-// `ignoredApps` / `ignoredProjects` are Sets of plaintext names. The
-// caller is responsible for having decrypted entry.app / entry.project
+// `ignoredApps` / `ignoredProjects` are Sets of plaintext names.
+// `ignoredBreakdownPatterns` is an array of { appName, pattern } — patterns
+// starting with "." match as file extensions (suffix), others as substrings.
+// The caller is responsible for having decrypted entry.app / entry.project
 // before this is called.
-export function filterActive(entries, { ignoredApps, ignoredProjects } = {}) {
+export function filterActive(entries, { ignoredApps, ignoredProjects, ignoredBreakdownPatterns } = {}) {
+  const hasPatterns = Array.isArray(ignoredBreakdownPatterns) && ignoredBreakdownPatterns.length > 0;
   return entries.filter((e) => {
     if (e.is_passive === 1) return false;
     if (ignoredApps && e.app && ignoredApps.has(e.app)) return false;
     if (ignoredProjects && e.project && ignoredProjects.has(e.project)) return false;
+    if (hasPatterns && e.app && e.project) {
+      const proj = String(e.project).toLowerCase();
+      for (const p of ignoredBreakdownPatterns) {
+        if (p.appName !== e.app) continue;
+        const pat = String(p.pattern || "").trim().toLowerCase();
+        if (!pat) continue;
+        if (pat.startsWith(".") ? proj.endsWith(pat) : proj.includes(pat)) return false;
+      }
+    }
     return true;
   });
 }

@@ -22,6 +22,10 @@ const state = {
   // User preferences from sync_settings. Decrypted client-side.
   ignoredApps: new Set(),
   ignoredProjects: new Set(),
+  // ignored_breakdown_patterns: per-app keyword/extension patterns.
+  // Shape: Array<{ appName: string; pattern: string }>. Patterns starting
+  // with "." are extension (suffix) matches; others are substring matches.
+  ignoredBreakdownPatterns: [],
   // UI state
   period: "7d",
   route: "dashboard",

@@ -31,7 +31,7 @@ export function renderDashboard(container, state) {
   // The dashboard, charts, daily bars, and per-day totals all run on
   // active entries — passive/away-listening is intentionally invisible
   // here, matching the desktop's "Today" total.
-  const all = filterActive(allRaw, { ignoredApps: state.ignoredApps, ignoredProjects: state.ignoredProjects });
+  const all = filterActive(allRaw, { ignoredApps: state.ignoredApps, ignoredProjects: state.ignoredProjects, ignoredBreakdownPatterns: state.ignoredBreakdownPatterns });
   const inPeriod = filterByPeriod(all, state.period);
 
   // Total time = unique 30s buckets × 30s. Dedupes overlapping device

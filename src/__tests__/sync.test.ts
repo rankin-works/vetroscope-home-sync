@@ -455,8 +455,9 @@ describe("/sync", () => {
     // Same compound-cursor treatment for settings — bulk pushes (e.g.
     // a Reset Cloud Data → re-push flow) can stamp every setting with
     // the same `now`, and the time-only cursor would skip rows at the
-    // boundary. SYNCED_SETTING_KEYS only has ignored_apps + ignored_projects
-    // today, so we can't realistically exceed SETTING_LIMIT in practice —
+    // boundary. SYNCED_SETTING_KEYS has ignored_apps + ignored_projects +
+    // ignored_breakdown_patterns today, so we can't realistically exceed
+    // SETTING_LIMIT in practice —
     // this test still exercises the compound-cursor path to prove the
     // pagination is correct.
     const admin = await bootstrapAdmin(h);

@@ -45,7 +45,7 @@ const SETTING_LIMIT = 100;
 // Allowlist of sync-eligible setting keys. The client has historically
 // attempted to push additional keys; rejecting unknown ones keeps the
 // server-side schema stable and the payload bounded.
-const SYNCED_SETTING_KEYS = new Set(["ignored_apps", "ignored_projects"]);
+const SYNCED_SETTING_KEYS = new Set(["ignored_apps", "ignored_projects", "ignored_breakdown_patterns"]);
 
 export const syncRoutes: FastifyPluginAsync = async (fastify) => {
   fastify.addHook("preHandler", fastify.authenticate);
