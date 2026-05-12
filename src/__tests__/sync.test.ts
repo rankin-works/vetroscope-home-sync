@@ -451,6 +451,124 @@ describe("/sync", () => {
     expect(body.icons[0].name_hash).toBe("h1");
   });
 
+  it("tag push round-trips icon_data_url and parent_uuid", async () => {
+    // 005 added both columns to sync_tags. Before 005 they were silently
+    // dropped on push and never returned on pull, breaking tag icons and
+    // the nested-tag hierarchy across devices.
+    const admin = await bootstrapAdmin(h);
+    const parent = {
+      uuid: "tag-parent",
+      name: "enc-work",
+      color: "#0ea5e9",
+      sticky: 0,
+      icon_data_url: null,
+      parent_uuid: null,
+      deleted: 0,
+      updated_at: "2026-04-30T08:00:00.000Z",
+    };
+    const child = {
+      uuid: "tag-child",
+      name: "enc-design",
+      color: "#a855f7",
+      sticky: 1,
+      icon_data_url: "enc-icon-data-url",
+      parent_uuid: "tag-parent",
+      deleted: 0,
+      updated_at: "2026-04-30T08:00:01.000Z",
+    };
+    const push = await h.app.inject({
+      method: "POST",
+      url: "/sync/push",
+      headers: { authorization: `Bearer ${admin.accessToken}` },
+      payload: { tags: [parent, child] },
+    });
+    expect(push.statusCode).toBe(200);
+
+    const pull = await h.app.inject({
+      method: "POST",
+      url: "/sync/pull",
+      headers: { authorization: `Bearer ${admin.accessToken}` },
+      payload: { cursor: null, device_id: "other-device" },
+    });
+    expect(pull.statusCode).toBe(200);
+    const rows = pull.json().tags as Array<typeof child>;
+    expect(rows).toHaveLength(2);
+    const byUuid = new Map(rows.map((r) => [r.uuid, r]));
+    expect(byUuid.get("tag-parent")!.parent_uuid).toBeNull();
+    expect(byUuid.get("tag-parent")!.icon_data_url).toBeNull();
+    expect(byUuid.get("tag-child")!.parent_uuid).toBe("tag-parent");
+    expect(byUuid.get("tag-child")!.icon_data_url).toBe("enc-icon-data-url");
+  });
+
+  it("entry push round-trips sub_project", async () => {
+    // 005 added sub_project to sync_entries (browser-extension third-
+    // level breakdown — videos under YouTube, songs under Spotify Web).
+    const admin = await bootstrapAdmin(h);
+    const e = {
+      uuid: "e-sub",
+      device_id: admin.deviceId,
+      timestamp: "2026-04-30T09:00:00.000Z",
+      app_name: "enc-Chrome",
+      window_title: "enc-YouTube",
+      project: "enc-youtube.com",
+      sub_project: "enc-Channel — Some Video Title",
+      is_adobe: 0,
+      is_passive: 0,
+      tag_uuid: null,
+      platform: "darwin",
+      updated_at: "2026-04-30T09:00:00.000Z",
+    };
+    await h.app.inject({
+      method: "POST",
+      url: "/sync/push",
+      headers: { authorization: `Bearer ${admin.accessToken}` },
+      payload: { entries: [e] },
+    });
+    const pull = await h.app.inject({
+      method: "POST",
+      url: "/sync/pull",
+      headers: { authorization: `Bearer ${admin.accessToken}` },
+      payload: { cursor: null, device_id: "other-device" },
+    });
+    const rows = pull.json().entries as Array<typeof e>;
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.sub_project).toBe("enc-Channel — Some Video Title");
+  });
+
+  it("sync_tag_sticky_exclusions round-trips through push + pull", async () => {
+    // 005 added the table. Before 005 the home-sync server didn't have
+    // it at all — disabling sticky auto-attachment of a tag for a
+    // specific scope only took effect on the device where it was
+    // toggled.
+    const admin = await bootstrapAdmin(h);
+    const tse = {
+      uuid: "tse-1",
+      tag_uuid: "tag-abc",
+      app_name: "enc-Cursor",
+      project: "enc-vetroscope",
+      deleted: 0,
+      updated_at: "2026-04-30T08:00:00.000Z",
+    };
+    await h.app.inject({
+      method: "POST",
+      url: "/sync/push",
+      headers: { authorization: `Bearer ${admin.accessToken}` },
+      payload: { tag_sticky_exclusions: [tse] },
+    });
+    const pull = await h.app.inject({
+      method: "POST",
+      url: "/sync/pull",
+      headers: { authorization: `Bearer ${admin.accessToken}` },
+      payload: { cursor: null, device_id: "other-device" },
+    });
+    const rows = pull.json().tag_sticky_exclusions as Array<typeof tse>;
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.uuid).toBe("tse-1");
+    expect(rows[0]!.tag_uuid).toBe("tag-abc");
+    expect(rows[0]!.app_name).toBe("enc-Cursor");
+    expect(rows[0]!.project).toBe("enc-vetroscope");
+  });
+
   it("setting pull paginates correctly when many rows share an updated_at", async () => {
     // Same compound-cursor treatment for settings — bulk pushes (e.g.
     // a Reset Cloud Data → re-push flow) can stamp every setting with

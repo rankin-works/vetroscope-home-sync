@@ -75,6 +75,11 @@ export interface SyncEntry {
   app_name: string;
   window_title: string | null;
   project: string | null;
+  // Third-level breakdown from the browser extension (videos under
+  // YouTube, songs under Spotify Web, etc.). Encrypted client-side,
+  // same shape as project. Optional on the wire so pre-005 servers and
+  // older clients still parse rows without it.
+  sub_project?: string | null;
   is_adobe: number;
   // 1 = away-listening / background sample (e.g. music playing while
   // another app is focused). Excluded from active-time totals on
@@ -91,6 +96,22 @@ export interface SyncTag {
   name: string;
   color: string;
   sticky: number;
+  // Optional user-uploaded tag icon (encrypted data URL). Added in 005.
+  // Pre-005 servers don't surface it on pull.
+  icon_data_url?: string | null;
+  // Cross-device parent reference for nested tags. NULL = root tag.
+  // Cleartext — uuids carry no user-identifying data. Added in 005;
+  // pre-005 servers drop it on push.
+  parent_uuid?: string | null;
+  deleted: number;
+  updated_at: string;
+}
+
+export interface SyncTagStickyExclusion {
+  uuid: string;
+  tag_uuid: string | null;
+  app_name: string;     // encrypted client-side
+  project: string | null; // encrypted client-side, null when scope has no breakdown
   deleted: number;
   updated_at: string;
 }
@@ -166,6 +187,9 @@ export interface PushPayload {
   icons?: SyncIcon[];
   overrides?: SyncOverride[];
   settings?: SyncSetting[];
+  // Per-(tag, app, project) sticky-exclusion tombstones. Added in 005.
+  // Pre-005 servers silently drop this collection.
+  tag_sticky_exclusions?: SyncTagStickyExclusion[];
 }
 
 // Compound cursor for tables where rows commonly share an `updated_at`
@@ -190,6 +214,10 @@ export interface PullPayload {
   // fields, so older servers reject nothing.
   icon_cursor?: CompoundCursor | null;
   setting_cursor?: CompoundCursor | null;
+  // tag_sticky_exclusions share the same shared-timestamp hazard as
+  // icons + settings — a bulk re-push during Reset Cloud Data stamps
+  // every row with the same `now`. Compound cursor on (updated_at, uuid).
+  tag_sticky_exclusion_cursor?: CompoundCursor | null;
 }
 
 export interface PullResponse {
@@ -201,6 +229,9 @@ export interface PullResponse {
   icons: SyncIcon[];
   overrides: SyncOverride[];
   settings: SyncSetting[];
+  // Per-(tag, app, project) sticky-exclusion tombstones. Empty when the
+  // server predates 005 or when the user has no exclusions. Added in 005.
+  tag_sticky_exclusions?: SyncTagStickyExclusion[];
   cursor: string;
   has_more?: boolean;
   // Set by v0.1.0-beta.4+ servers when icons / settings were paginated.
@@ -209,4 +240,6 @@ export interface PullResponse {
   // one shot) or when the server predates the fix.
   icon_cursor?: CompoundCursor;
   setting_cursor?: CompoundCursor;
+  // Added in 005 alongside the sync_tag_sticky_exclusions table.
+  tag_sticky_exclusion_cursor?: CompoundCursor;
 }

@@ -30,6 +30,7 @@ import type {
   SyncOverride,
   SyncSetting,
   SyncTag,
+  SyncTagStickyExclusion,
 } from "../types.js";
 
 const BATCH_SIZE = 500;
@@ -81,6 +82,7 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
         string,
         string | null,
         string | null,
+        string | null,
         number,
         number,
         string | null,
@@ -88,12 +90,15 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
         string,
       ]
     >(
-      // is_passive (003) refreshes on conflict — same rationale as
-      // tag_uuid and platform: a later push may carry a corrected
-      // classification that should overwrite an older one.
-      `INSERT INTO sync_entries (uuid, user_id, device_id, timestamp, app_name, window_title, project, is_adobe, is_passive, tag_uuid, platform, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      // sub_project (005) carries the browser-extension third-level
+      // breakdown (videos under YouTube, songs under Spotify Web, etc.).
+      // Refreshes on conflict alongside is_passive / tag_uuid / platform:
+      // a later push may carry a corrected classification that should
+      // overwrite an older one.
+      `INSERT INTO sync_entries (uuid, user_id, device_id, timestamp, app_name, window_title, project, sub_project, is_adobe, is_passive, tag_uuid, platform, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(uuid) DO UPDATE SET
+         sub_project = excluded.sub_project,
          is_passive = excluded.is_passive,
          tag_uuid = excluded.tag_uuid,
          platform = excluded.platform,
@@ -102,14 +107,31 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
     );
 
     const upsertTag = stmts.prepare<
-      [string, string, string, string, number, number, string]
+      [
+        string,
+        string,
+        string,
+        string,
+        number,
+        string | null,
+        string | null,
+        number,
+        string,
+      ]
     >(
-      `INSERT INTO sync_tags (uuid, user_id, name, color, sticky, deleted, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)
+      // icon_data_url (005) is an optional user-uploaded tag icon,
+      // encrypted client-side. parent_uuid (005) is the cross-device
+      // parent reference for nested tags — cleartext because tag uuids
+      // carry no user-identifying data. Both refresh on conflict so a
+      // later push can correct or clear them.
+      `INSERT INTO sync_tags (uuid, user_id, name, color, sticky, icon_data_url, parent_uuid, deleted, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(uuid) DO UPDATE SET
          name = excluded.name,
          color = excluded.color,
          sticky = excluded.sticky,
+         icon_data_url = excluded.icon_data_url,
+         parent_uuid = excluded.parent_uuid,
          deleted = excluded.deleted,
          updated_at = excluded.updated_at
        WHERE excluded.updated_at > sync_tags.updated_at`,
@@ -242,6 +264,31 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
        WHERE excluded.updated_at > sync_overrides.updated_at`,
     );
 
+    // Per-(tag, app, project) sticky exclusion tombstones. Same shape as
+    // the other sync_* upserts — uuid is the natural key, updated_at
+    // gates conflicts. Added in 005.
+    const upsertTagStickyExclusion = stmts.prepare<
+      [
+        string,
+        string,
+        string | null,
+        string,
+        string | null,
+        number,
+        string,
+      ]
+    >(
+      `INSERT INTO sync_tag_sticky_exclusions (uuid, user_id, tag_uuid, app_name, project, deleted, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(uuid) DO UPDATE SET
+         tag_uuid = excluded.tag_uuid,
+         app_name = excluded.app_name,
+         project = excluded.project,
+         deleted = excluded.deleted,
+         updated_at = excluded.updated_at
+       WHERE excluded.updated_at > sync_tag_sticky_exclusions.updated_at`,
+    );
+
     const updateDeviceSync = stmts.prepare<[string, string, string]>(
       "UPDATE devices SET last_sync_at = ? WHERE id = ? AND user_id = ?",
     );
@@ -256,6 +303,7 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
           e.app_name,
           e.window_title,
           e.project,
+          e.sub_project ?? null,
           e.is_adobe,
           e.is_passive ?? 0,
           e.tag_uuid,
@@ -270,6 +318,8 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
           t.name,
           t.color,
           t.sticky,
+          t.icon_data_url ?? null,
+          t.parent_uuid ?? null,
           t.deleted,
           t.updated_at || now,
         );
@@ -340,6 +390,17 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
           o.updated_at || now,
         );
       }
+      for (const tse of (body.tag_sticky_exclusions ?? []).slice(0, BATCH_SIZE)) {
+        upsertTagStickyExclusion.run(
+          tse.uuid,
+          userId,
+          tse.tag_uuid ?? null,
+          tse.app_name,
+          tse.project ?? null,
+          tse.deleted,
+          tse.updated_at || now,
+        );
+      }
       updateDeviceSync.run(now, auth.device_id, userId);
     });
     tx();
@@ -367,7 +428,7 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
 
     const entries = fastify.db
       .prepare<[string, string, string, number], SyncEntry>(
-        `SELECT uuid, device_id, timestamp, app_name, window_title, project, is_adobe, is_passive, tag_uuid, platform, updated_at
+        `SELECT uuid, device_id, timestamp, app_name, window_title, project, sub_project, is_adobe, is_passive, tag_uuid, platform, updated_at
          FROM sync_entries
          WHERE user_id = ? AND updated_at > ? AND device_id != ?
          ORDER BY updated_at ASC
@@ -377,7 +438,7 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
 
     const tags = fastify.db
       .prepare<[string, string, number], SyncTag>(
-        `SELECT uuid, name, color, sticky, deleted, updated_at
+        `SELECT uuid, name, color, sticky, icon_data_url, parent_uuid, deleted, updated_at
          FROM sync_tags
          WHERE user_id = ? AND updated_at > ?
          ORDER BY updated_at ASC
@@ -486,6 +547,33 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
           )
           .all(userId, cursor);
 
+    // Tag sticky exclusions (005). Same compound-cursor pattern as icons /
+    // settings — a Reset Cloud Data → re-push flow can stamp every row
+    // with the same `now`, and strict-greater-than pagination would skip
+    // rows at the boundary. Tiebreaker is `uuid`. Legacy fallback uses the
+    // shared time cursor.
+    const tseCursor = body.tag_sticky_exclusion_cursor;
+    const tagStickyExclusions = tseCursor
+      ? fastify.db
+          .prepare<[string, string, string, string, number], SyncTagStickyExclusion>(
+            `SELECT uuid, tag_uuid, app_name, project, deleted, updated_at
+             FROM sync_tag_sticky_exclusions
+             WHERE user_id = ?
+               AND (updated_at > ? OR (updated_at = ? AND uuid > ?))
+             ORDER BY updated_at ASC, uuid ASC
+             LIMIT ?`,
+          )
+          .all(userId, tseCursor.updated_at, tseCursor.updated_at, tseCursor.key, BATCH_SIZE)
+      : fastify.db
+          .prepare<[string, string, number], SyncTagStickyExclusion>(
+            `SELECT uuid, tag_uuid, app_name, project, deleted, updated_at
+             FROM sync_tag_sticky_exclusions
+             WHERE user_id = ? AND updated_at > ?
+             ORDER BY updated_at ASC, uuid ASC
+             LIMIT ?`,
+          )
+          .all(userId, cursor, BATCH_SIZE);
+
     fastify.db
       .prepare<[string, string, string]>(
         "UPDATE devices SET last_sync_at = ? WHERE id = ? AND user_id = ?",
@@ -493,9 +581,9 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
       .run(now, auth.device_id, userId);
 
     // Time-cursor types: entries, tags, goals, markers, achievements.
-    // Icons + settings are governed by their own compound cursors and
-    // tracked separately so the time cursor doesn't have to lie about
-    // their state.
+    // Icons + settings + tag_sticky_exclusions are governed by their own
+    // compound cursors and tracked separately so the time cursor doesn't
+    // have to lie about their state.
     const hitLimitTimeTypes =
       entries.length >= BATCH_SIZE ||
       tags.length >= BATCH_SIZE ||
@@ -504,6 +592,7 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
       achievements.length >= BATCH_SIZE;
     const hitLimitIcons = icons.length >= ICON_LIMIT;
     const hitLimitSettings = settings.length >= SETTING_LIMIT;
+    const hitLimitTse = tagStickyExclusions.length >= BATCH_SIZE;
 
     let newCursor = now;
     if (hitLimitTimeTypes) {
@@ -515,10 +604,9 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
       }
     }
 
-    // Compound cursors for icons / settings — only emitted when that
-    // table actually paginated (response was truncated). The client
-    // round-trips them on the next pull. Absence means "this type is
-    // fully drained at this snapshot."
+    // Compound cursors — only emitted when the matching table paginated.
+    // The client round-trips them on the next pull. Absence means "this
+    // type is fully drained at this snapshot."
     const nextIconCursor = hitLimitIcons && icons.length > 0
       ? {
           updated_at: icons[icons.length - 1]!.updated_at,
@@ -531,6 +619,12 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
           key: settings[settings.length - 1]!.key,
         }
       : undefined;
+    const nextTseCursor = hitLimitTse && tagStickyExclusions.length > 0
+      ? {
+          updated_at: tagStickyExclusions[tagStickyExclusions.length - 1]!.updated_at,
+          key: tagStickyExclusions[tagStickyExclusions.length - 1]!.uuid,
+        }
+      : undefined;
 
     const response: PullResponse = {
       entries,
@@ -541,10 +635,12 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
       icons,
       overrides,
       settings,
+      tag_sticky_exclusions: tagStickyExclusions,
       cursor: newCursor,
-      has_more: hitLimitTimeTypes || hitLimitIcons || hitLimitSettings,
+      has_more: hitLimitTimeTypes || hitLimitIcons || hitLimitSettings || hitLimitTse,
       ...(nextIconCursor ? { icon_cursor: nextIconCursor } : {}),
       ...(nextSettingCursor ? { setting_cursor: nextSettingCursor } : {}),
+      ...(nextTseCursor ? { tag_sticky_exclusion_cursor: nextTseCursor } : {}),
     };
     return reply.send(response);
   });
@@ -583,6 +679,7 @@ export function wipeUserSyncRows(db: Database.Database, userId: string): void {
     "sync_icons",
     "sync_overrides",
     "sync_settings",
+    "sync_tag_sticky_exclusions",
   ];
   const tx = db.transaction(() => {
     for (const t of tables) {
