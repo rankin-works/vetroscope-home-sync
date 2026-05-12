@@ -609,4 +609,43 @@ describe("/sync", () => {
       "ignored_projects",
     ]);
   });
+
+  it("rejects too-old clients with 426 Upgrade Required", async () => {
+    // The server-info module exports SERVER_MIN_CLIENT_VERSION; bumping
+    // it bumps this gate. Force the device row's app_version below that
+    // floor and confirm /sync/push refuses with a structured 426 body.
+    const admin = await bootstrapAdmin(h);
+    h.db
+      .prepare("UPDATE devices SET app_version = ? WHERE id = ?")
+      .run("0.0.1", admin.deviceId);
+
+    const res = await h.app.inject({
+      method: "POST",
+      url: "/sync/push",
+      headers: { authorization: `Bearer ${admin.accessToken}` },
+      payload: {},
+    });
+    expect(res.statusCode).toBe(426);
+    const body = res.json();
+    expect(body.error).toBe("client_too_old");
+    expect(body.current_client_version).toBe("0.0.1");
+    expect(typeof body.min_client_version).toBe("string");
+  });
+
+  it("lets devices without a recorded app_version through (pre-006 fallthrough)", async () => {
+    // Devices that pre-date migration 006 have NULL app_version. The
+    // gate falls open for them so they aren't locked out before they've
+    // had a chance to re-auth and stamp a version.
+    const admin = await bootstrapAdmin(h);
+    h.db
+      .prepare("UPDATE devices SET app_version = NULL WHERE id = ?")
+      .run(admin.deviceId);
+    const res = await h.app.inject({
+      method: "POST",
+      url: "/sync/push",
+      headers: { authorization: `Bearer ${admin.accessToken}` },
+      payload: {},
+    });
+    expect(res.statusCode).toBe(200);
+  });
 });

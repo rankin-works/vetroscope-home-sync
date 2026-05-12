@@ -31,6 +31,9 @@ interface SetupBody {
   device_name?: string;
   device_id?: string;
   platform?: Platform;
+  // Vetroscope app version (e.g. "0.2.22"). Stored on the device row
+  // for the version-mismatch gate on /sync/*. Optional on the wire.
+  app_version?: string;
 }
 
 export const setupRoutes: FastifyPluginAsync = async (fastify) => {
@@ -118,6 +121,7 @@ export const setupRoutes: FastifyPluginAsync = async (fastify) => {
           id: device_id ?? null,
           deviceName: device_name,
           platform,
+          appVersion: body.app_version ?? null,
         });
         const tokens = await issueTokens(
           fastify.db,

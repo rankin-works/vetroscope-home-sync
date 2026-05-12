@@ -87,4 +87,15 @@ describe("/setup", () => {
     const after = await h.app.inject({ method: "GET", url: "/server-info" });
     expect(after.json().setup_required).toBe(false);
   });
+
+  it("/server-info advertises min_client_version", async () => {
+    // The client reads this on every cycle's first refresh and gates
+    // its own runtime against it. Format must be a semver-shaped string
+    // so the client's compareSemver can use it directly.
+    const res = await h.app.inject({ method: "GET", url: "/server-info" });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(typeof body.min_client_version).toBe("string");
+    expect(body.min_client_version).toMatch(/^\d+\.\d+\.\d+/);
+  });
 });

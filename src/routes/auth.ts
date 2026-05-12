@@ -25,6 +25,7 @@ import {
   assertDeviceCapacity,
   DeviceLimitReachedError,
   findDevice,
+  recordDeviceAppVersion,
   registerDevice,
 } from "../lib/device-service.js";
 import { consumeInvite } from "../lib/invite-service.js";
@@ -39,6 +40,10 @@ interface RegisterBody {
   device_id?: string;
   platform?: Platform;
   invite_token?: string;
+  // Vetroscope app version (e.g. "0.2.22"). Stored on the device row
+  // so the server can gate too-old clients on /sync/*. Optional on
+  // the wire so pre-006 clients still work — they just stay NULL.
+  app_version?: string;
 }
 
 interface LoginBody {
@@ -47,6 +52,7 @@ interface LoginBody {
   device_name?: string;
   device_id?: string;
   platform?: Platform;
+  app_version?: string;
 }
 
 interface WebLoginBody {
@@ -60,6 +66,10 @@ interface WebLoginBody {
 
 interface RefreshBody {
   refresh_token?: string;
+  // Vetroscope app version (e.g. "0.2.22"). Updates devices.app_version
+  // on each refresh so the server's view of "what version is this
+  // device on?" stays current even between explicit logins.
+  app_version?: string;
 }
 
 export const authRoutes: FastifyPluginAsync = async (fastify) => {
@@ -148,6 +158,7 @@ export const authRoutes: FastifyPluginAsync = async (fastify) => {
           id: device_id ?? null,
           deviceName: device_name,
           platform,
+          appVersion: body.app_version ?? null,
         });
         const tokens = await issueTokens(
           fastify.db,
@@ -226,7 +237,13 @@ export const authRoutes: FastifyPluginAsync = async (fastify) => {
           id: device_id ?? null,
           deviceName: device_name,
           platform,
+          appVersion: body.app_version ?? null,
         });
+      } else {
+        // Existing device — record the current app version on the row so
+        // a returning client's version is always up-to-date in the
+        // devices table without forcing a re-register.
+        recordDeviceAppVersion(fastify.db, user.id, resolvedDeviceId, body.app_version);
       }
 
       const tokens = await issueTokens(
@@ -337,6 +354,12 @@ export const authRoutes: FastifyPluginAsync = async (fastify) => {
       // device_id like "web:abc123" identifies a web session; carry the
       // scope through so the refreshed access token stays read-only.
       const scope: "sync" | "web" = stored.device_id.startsWith("web:") ? "web" : "sync";
+      // Web sessions don't have a row in `devices`, so the no-op guard
+      // inside recordDeviceAppVersion would still fire its UPDATE for
+      // zero rows. Skip the call entirely for web sessions for clarity.
+      if (scope === "sync") {
+        recordDeviceAppVersion(fastify.db, stored.id, stored.device_id, body.app_version);
+      }
       const tokens = await issueTokens(
         fastify.db,
         fastify.jwtSecret,

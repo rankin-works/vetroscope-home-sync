@@ -32,6 +32,8 @@ import type {
   SyncTag,
   SyncTagStickyExclusion,
 } from "../types.js";
+import { compareSemver } from "../lib/semver.js";
+import { SERVER_MIN_CLIENT_VERSION } from "./server-info.js";
 
 const BATCH_SIZE = 500;
 const ICON_LIMIT = 50;
@@ -60,6 +62,44 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
       return reply.status(403).send({
         error: "web_token_forbidden",
         message: "Web sessions cannot push or pull sync data.",
+      });
+    }
+    return undefined;
+  });
+
+  // Client-version gate. Reject too-old desktop clients with 426
+  // Upgrade Required so they can't silently push/pull payloads that
+  // drop the columns this server expects. The client's app_version
+  // is recorded on every /auth/login + /auth/register + /auth/refresh
+  // + /setup, so the latest version is always one DB lookup away.
+  //
+  // Falls open when:
+  //   - app_version is NULL on the device row (pre-006 device that
+  //     hasn't re-authed since the column was added — give them one
+  //     more cycle to refresh and stamp a version before gating)
+  //   - the version string fails to parse (malformed value, treat as
+  //     unknown rather than gate aggressively)
+  //
+  // The structured 426 body lets the client surface a precise
+  // "update to X" message in the UI without scraping the error string.
+  fastify.addHook("preHandler", async (request, reply) => {
+    const auth = request.authUser as JWTPayload | undefined;
+    if (!auth) return undefined;
+    const row = fastify.db
+      .prepare<[string, string], { app_version: string | null }>(
+        "SELECT app_version FROM devices WHERE id = ? AND user_id = ?",
+      )
+      .get(auth.device_id, auth.sub);
+    const appVersion = row?.app_version ?? null;
+    if (appVersion === null) return undefined;
+    if (compareSemver(appVersion, SERVER_MIN_CLIENT_VERSION) < 0) {
+      return reply.status(426).send({
+        error: "client_too_old",
+        message:
+          `Vetroscope ${appVersion} is older than this Home Sync server supports. ` +
+          `Update the app to ${SERVER_MIN_CLIENT_VERSION} or newer to continue syncing.`,
+        min_client_version: SERVER_MIN_CLIENT_VERSION,
+        current_client_version: appVersion,
       });
     }
     return undefined;

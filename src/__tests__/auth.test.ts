@@ -36,6 +36,33 @@ describe("auth flow", () => {
     expect(new Date(body.refresh_expires_at).getTime()).toBeGreaterThan(Date.now());
   });
 
+  it("login persists app_version onto the device row", async () => {
+    // Migration 006 added devices.app_version. Login (and register +
+    // setup + refresh) stamp it onto the existing or newly-created
+    // row, which the /sync/* gate then reads to enforce the
+    // min-client-version policy.
+    await bootstrapAdmin(h);
+    const res = await h.app.inject({
+      method: "POST",
+      url: "/auth/login",
+      payload: {
+        email: "admin@test.lan",
+        password: "hunter2hunter2",
+        device_name: "Web",
+        platform: "darwin",
+        app_version: "0.2.22",
+      },
+    });
+    expect(res.statusCode).toBe(200);
+    const deviceId = res.json().device_id;
+    const row = h.db
+      .prepare<[string], { app_version: string | null }>(
+        "SELECT app_version FROM devices WHERE id = ?",
+      )
+      .get(deviceId);
+    expect(row?.app_version).toBe("0.2.22");
+  });
+
   it("login rejects bad password", async () => {
     await bootstrapAdmin(h);
     const res = await h.app.inject({

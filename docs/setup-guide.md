@@ -156,6 +156,74 @@ which writes a consistent point-in-time snapshot to `sync.db.bak`.
 The `sqlite3` CLI is bundled in the runtime image as of `v0.1.0-beta.3`,
 so the command above works out of the box — no `apk add` step required.
 
+## 8. Keeping Home Sync up to date
+
+New Home Sync releases occasionally add columns or tables that the
+desktop client needs in order to sync correctly. The Vetroscope app
+checks your server's version at the start of every sync cycle and
+refuses to push until they match — so keeping the server current
+matters.
+
+### Manual upgrade (recommended)
+
+The straightforward path:
+
+```bash
+cd /path/to/vetroscope-home-sync   # wherever your docker-compose.yml lives
+```
+
+Edit `docker-compose.yml` and bump the image tag to the new version
+(e.g. `image: ghcr.io/rankin-works/vetroscope-home-sync:0.1.0-beta.10`).
+Then:
+
+```bash
+sudo docker compose pull
+sudo docker compose up -d
+```
+
+The new container picks up where the old one left off — your data
+directory is bind-mounted and persists across restarts, and any new
+schema migrations run automatically on first boot.
+
+The Vetroscope app surfaces an "update available" banner on the
+target row when it detects an outdated server. Tapping it shows the
+exact commands above with a copy button.
+
+### Auto-updates with Watchtower (optional)
+
+For zero-touch updates, you can add [Watchtower](https://containrrr.dev/watchtower/)
+to your stack. It's a small container that watches GHCR for newer
+versions of images you've tagged and recreates the containers when
+new images appear.
+
+```yaml
+# In your docker-compose.yml, alongside vetroscope-home-sync:
+services:
+  watchtower:
+    image: containrrr/watchtower
+    container_name: watchtower
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      WATCHTOWER_POLL_INTERVAL: "21600"   # 6 hours
+      WATCHTOWER_CLEANUP: "true"
+      WATCHTOWER_INCLUDE_RESTARTING: "true"
+    command: vetroscope-home-sync           # only update this container
+```
+
+**Security note:** Watchtower needs access to the Docker socket
+(`/var/run/docker.sock`), which is effectively root-equivalent on
+the host. That's the trade-off for auto-updates. Watchtower is a
+mature open-source project widely used in the homelab community,
+but you should make this decision deliberately — if the container is
+ever compromised, the attacker controls the Docker daemon. For most
+homelab setups behind a LAN this is acceptable; for anything more
+exposed, prefer the manual upgrade flow above.
+
+We don't ship or maintain Watchtower — this is just a pattern that
+works well with the way Home Sync is packaged.
+
 ## Common next steps
 
 - [Reverse-proxy setup](reverse-proxy.md)

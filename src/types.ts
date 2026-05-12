@@ -27,6 +27,10 @@ export interface DeviceRow {
   user_id: string;
   device_name: string;
   platform: string;
+  // Vetroscope app version (e.g. "0.2.22"). Refreshed on every token-
+  // issuing request that supplies it; NULL on pre-006 rows. Used by
+  // /sync/* to gate too-old clients with 426 Upgrade Required.
+  app_version: string | null;
   last_sync_at: string | null;
   created_at: string;
 }

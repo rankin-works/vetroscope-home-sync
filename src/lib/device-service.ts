@@ -21,6 +21,10 @@ export interface RegisterDeviceInput {
   id: string | null;
   deviceName: string;
   platform: string;
+  // Vetroscope app version (e.g. "0.2.22"). Optional on the wire so
+  // pre-006 clients still work; stored alongside the device row for
+  // the version-mismatch gate on /sync/* and admin diagnostics.
+  appVersion?: string | null;
 }
 
 export function registerDevice(
@@ -29,10 +33,25 @@ export function registerDevice(
   input: RegisterDeviceInput,
 ): string {
   const id = input.id ?? randomUUID();
-  db.prepare<[string, string, string, string]>(
-    "INSERT INTO devices (id, user_id, device_name, platform) VALUES (?, ?, ?, ?)",
-  ).run(id, userId, input.deviceName, input.platform);
+  db.prepare<[string, string, string, string, string | null]>(
+    "INSERT INTO devices (id, user_id, device_name, platform, app_version) VALUES (?, ?, ?, ?, ?)",
+  ).run(id, userId, input.deviceName, input.platform, input.appVersion ?? null);
   return id;
+}
+
+// Update devices.app_version for an existing device. Called on every
+// token-issuing path so the server's view of "what version is this
+// device on?" stays current. No-op when appVersion is undefined.
+export function recordDeviceAppVersion(
+  db: DB,
+  userId: string,
+  deviceId: string,
+  appVersion: string | null | undefined,
+): void {
+  if (appVersion === undefined) return;
+  db.prepare<[string | null, string, string]>(
+    "UPDATE devices SET app_version = ? WHERE id = ? AND user_id = ?",
+  ).run(appVersion ?? null, deviceId, userId);
 }
 
 export function findDevice(
