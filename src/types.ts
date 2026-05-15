@@ -120,6 +120,24 @@ export interface SyncTagStickyExclusion {
   updated_at: string;
 }
 
+// Per-(app, project, sub_project) canonical media URLs. Pushed by
+// clients that have opted into media-link sync for this target. All
+// four PII columns are encrypted client-side; `kind` is cleartext.
+// Added in 007 — pre-007 servers silently drop the array on push and
+// return an empty (or undefined) array on pull.
+export interface SyncMediaLink {
+  uuid: string;
+  app_name: string;     // encrypted client-side
+  project: string;      // encrypted client-side
+  sub_project: string;  // encrypted client-side ('' encrypted as the sentinel)
+  url: string;          // encrypted client-side
+  kind: string;         // cleartext: 'spotify_track' | 'youtube_watch'
+  first_seen: string;
+  last_seen: string;
+  deleted: number;
+  updated_at: string;
+}
+
 export interface SyncGoal {
   uuid: string;
   type: string;
@@ -194,6 +212,9 @@ export interface PushPayload {
   // Per-(tag, app, project) sticky-exclusion tombstones. Added in 005.
   // Pre-005 servers silently drop this collection.
   tag_sticky_exclusions?: SyncTagStickyExclusion[];
+  // Captured media URLs (Spotify track URIs, YouTube /watch URLs).
+  // Added in 007. Pre-007 servers silently drop this collection.
+  media_links?: SyncMediaLink[];
 }
 
 // Compound cursor for tables where rows commonly share an `updated_at`
@@ -222,6 +243,12 @@ export interface PullPayload {
   // icons + settings — a bulk re-push during Reset Cloud Data stamps
   // every row with the same `now`. Compound cursor on (updated_at, uuid).
   tag_sticky_exclusion_cursor?: CompoundCursor | null;
+  // Captured media URLs paginate by compound cursor on (updated_at,
+  // uuid) — a fresh capture-enabled device pushes its whole library
+  // in one shot which clusters timestamps. Sent by clients running
+  // the 007-aware build; older clients omit and the server falls
+  // back to legacy time-only pagination.
+  media_link_cursor?: CompoundCursor | null;
 }
 
 export interface PullResponse {
@@ -236,6 +263,10 @@ export interface PullResponse {
   // Per-(tag, app, project) sticky-exclusion tombstones. Empty when the
   // server predates 005 or when the user has no exclusions. Added in 005.
   tag_sticky_exclusions?: SyncTagStickyExclusion[];
+  // Captured media URLs. Empty when the server predates 007, when the
+  // pushing device(s) haven't opted into media-link sync, or when no
+  // captured rows exist for the user. Added in 007.
+  media_links?: SyncMediaLink[];
   cursor: string;
   has_more?: boolean;
   // Set by v0.1.0-beta.4+ servers when icons / settings were paginated.
@@ -246,4 +277,6 @@ export interface PullResponse {
   setting_cursor?: CompoundCursor;
   // Added in 005 alongside the sync_tag_sticky_exclusions table.
   tag_sticky_exclusion_cursor?: CompoundCursor;
+  // Added in 007 alongside the sync_media_links table.
+  media_link_cursor?: CompoundCursor;
 }

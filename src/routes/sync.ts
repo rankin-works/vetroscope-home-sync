@@ -31,6 +31,7 @@ import type {
   SyncSetting,
   SyncTag,
   SyncTagStickyExclusion,
+  SyncMediaLink,
 } from "../types.js";
 import { compareSemver } from "../lib/semver.js";
 import { SERVER_MIN_CLIENT_VERSION } from "./server-info.js";
@@ -329,6 +330,42 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
        WHERE excluded.updated_at > sync_tag_sticky_exclusions.updated_at`,
     );
 
+    // Captured media URLs (Spotify track URIs, YouTube /watch URLs).
+    // app_name / project / sub_project / url are encrypted client-side;
+    // kind is cleartext for aggregate logging. LWW on updated_at like
+    // every other sync-eligible table. sub_project carries '' as the
+    // "no sub_project" sentinel (Spotify case where project itself is
+    // the song).
+    const upsertMediaLink = stmts.prepare<
+      [
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+        number,
+        string,
+      ]
+    >(
+      `INSERT INTO sync_media_links (uuid, user_id, app_name, project, sub_project, url, kind, first_seen, last_seen, deleted, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(uuid) DO UPDATE SET
+         app_name = excluded.app_name,
+         project = excluded.project,
+         sub_project = excluded.sub_project,
+         url = excluded.url,
+         kind = excluded.kind,
+         first_seen = excluded.first_seen,
+         last_seen = excluded.last_seen,
+         deleted = excluded.deleted,
+         updated_at = excluded.updated_at
+       WHERE excluded.updated_at > sync_media_links.updated_at`,
+    );
+
     const updateDeviceSync = stmts.prepare<[string, string, string]>(
       "UPDATE devices SET last_sync_at = ? WHERE id = ? AND user_id = ?",
     );
@@ -439,6 +476,21 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
           tse.project ?? null,
           tse.deleted,
           tse.updated_at || now,
+        );
+      }
+      for (const ml of (body.media_links ?? []).slice(0, BATCH_SIZE)) {
+        upsertMediaLink.run(
+          ml.uuid,
+          userId,
+          ml.app_name,
+          ml.project,
+          ml.sub_project,
+          ml.url,
+          ml.kind,
+          ml.first_seen,
+          ml.last_seen,
+          ml.deleted,
+          ml.updated_at || now,
         );
       }
       updateDeviceSync.run(now, auth.device_id, userId);
@@ -614,6 +666,33 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
           )
           .all(userId, cursor, BATCH_SIZE);
 
+    // Captured media URLs (007). Same compound-cursor treatment as
+    // sticky exclusions — a fresh capture-enabled device may push its
+    // entire library in one shot which clusters every row at the same
+    // `now`. Tiebreaker is `uuid`. Legacy fallback uses the shared
+    // time cursor for clients that pre-date the compound cursor.
+    const mediaLinkCursor = body.media_link_cursor;
+    const mediaLinks = mediaLinkCursor
+      ? fastify.db
+          .prepare<[string, string, string, string, number], SyncMediaLink>(
+            `SELECT uuid, app_name, project, sub_project, url, kind, first_seen, last_seen, deleted, updated_at
+             FROM sync_media_links
+             WHERE user_id = ?
+               AND (updated_at > ? OR (updated_at = ? AND uuid > ?))
+             ORDER BY updated_at ASC, uuid ASC
+             LIMIT ?`,
+          )
+          .all(userId, mediaLinkCursor.updated_at, mediaLinkCursor.updated_at, mediaLinkCursor.key, BATCH_SIZE)
+      : fastify.db
+          .prepare<[string, string, number], SyncMediaLink>(
+            `SELECT uuid, app_name, project, sub_project, url, kind, first_seen, last_seen, deleted, updated_at
+             FROM sync_media_links
+             WHERE user_id = ? AND updated_at > ?
+             ORDER BY updated_at ASC, uuid ASC
+             LIMIT ?`,
+          )
+          .all(userId, cursor, BATCH_SIZE);
+
     fastify.db
       .prepare<[string, string, string]>(
         "UPDATE devices SET last_sync_at = ? WHERE id = ? AND user_id = ?",
@@ -633,6 +712,7 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
     const hitLimitIcons = icons.length >= ICON_LIMIT;
     const hitLimitSettings = settings.length >= SETTING_LIMIT;
     const hitLimitTse = tagStickyExclusions.length >= BATCH_SIZE;
+    const hitLimitMediaLinks = mediaLinks.length >= BATCH_SIZE;
 
     let newCursor = now;
     if (hitLimitTimeTypes) {
@@ -665,6 +745,12 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
           key: tagStickyExclusions[tagStickyExclusions.length - 1]!.uuid,
         }
       : undefined;
+    const nextMediaLinkCursor = hitLimitMediaLinks && mediaLinks.length > 0
+      ? {
+          updated_at: mediaLinks[mediaLinks.length - 1]!.updated_at,
+          key: mediaLinks[mediaLinks.length - 1]!.uuid,
+        }
+      : undefined;
 
     const response: PullResponse = {
       entries,
@@ -676,11 +762,13 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
       overrides,
       settings,
       tag_sticky_exclusions: tagStickyExclusions,
+      media_links: mediaLinks,
       cursor: newCursor,
-      has_more: hitLimitTimeTypes || hitLimitIcons || hitLimitSettings || hitLimitTse,
+      has_more: hitLimitTimeTypes || hitLimitIcons || hitLimitSettings || hitLimitTse || hitLimitMediaLinks,
       ...(nextIconCursor ? { icon_cursor: nextIconCursor } : {}),
       ...(nextSettingCursor ? { setting_cursor: nextSettingCursor } : {}),
       ...(nextTseCursor ? { tag_sticky_exclusion_cursor: nextTseCursor } : {}),
+      ...(nextMediaLinkCursor ? { media_link_cursor: nextMediaLinkCursor } : {}),
     };
     return reply.send(response);
   });
@@ -720,6 +808,7 @@ export function wipeUserSyncRows(db: Database.Database, userId: string): void {
     "sync_overrides",
     "sync_settings",
     "sync_tag_sticky_exclusions",
+    "sync_media_links",
   ];
   const tx = db.transaction(() => {
     for (const t of tables) {
