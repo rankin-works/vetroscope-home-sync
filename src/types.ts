@@ -138,6 +138,21 @@ export interface SyncMediaLink {
   updated_at: string;
 }
 
+export interface SyncReminder {
+  uuid: string;
+  title: string;        // encrypted client-side
+  body: string | null;  // encrypted client-side when present
+  kind: string;         // cleartext: 'once' | 'repeat'
+  fire_at: string | null;
+  weekdays: string | null;
+  time_of_day: string | null;
+  start_date: string | null;
+  end_date: string | null;
+  enabled: number;
+  deleted: number;
+  updated_at: string;
+}
+
 export interface SyncGoal {
   uuid: string;
   type: string;
@@ -215,6 +230,10 @@ export interface PushPayload {
   // Captured media URLs (Spotify track URIs, YouTube /watch URLs).
   // Added in 007. Pre-007 servers silently drop this collection.
   media_links?: SyncMediaLink[];
+  // Custom reminders. Added in 008. Pre-008 servers silently drop
+  // this collection — local reminders still fire, they just don't
+  // cross devices via that server.
+  reminders?: SyncReminder[];
 }
 
 // Compound cursor for tables where rows commonly share an `updated_at`
@@ -249,6 +268,10 @@ export interface PullPayload {
   // the 007-aware build; older clients omit and the server falls
   // back to legacy time-only pagination.
   media_link_cursor?: CompoundCursor | null;
+  // Custom reminders. Same shared-timestamp hazard — a user may
+  // create several reminders in quick succession, clustering rows
+  // at the same `now`. Compound cursor on (updated_at, uuid).
+  reminder_cursor?: CompoundCursor | null;
 }
 
 export interface PullResponse {
@@ -267,6 +290,9 @@ export interface PullResponse {
   // pushing device(s) haven't opted into media-link sync, or when no
   // captured rows exist for the user. Added in 007.
   media_links?: SyncMediaLink[];
+  // Custom reminders. Empty when the server predates 008 or when the
+  // user has no reminders. Added in 008.
+  reminders?: SyncReminder[];
   cursor: string;
   has_more?: boolean;
   // Set by v0.1.0-beta.4+ servers when icons / settings were paginated.
@@ -279,4 +305,6 @@ export interface PullResponse {
   tag_sticky_exclusion_cursor?: CompoundCursor;
   // Added in 007 alongside the sync_media_links table.
   media_link_cursor?: CompoundCursor;
+  // Added in 008 alongside the sync_reminders table.
+  reminder_cursor?: CompoundCursor;
 }

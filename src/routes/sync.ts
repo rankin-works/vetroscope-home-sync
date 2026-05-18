@@ -32,6 +32,7 @@ import type {
   SyncTag,
   SyncTagStickyExclusion,
   SyncMediaLink,
+  SyncReminder,
 } from "../types.js";
 import { compareSemver } from "../lib/semver.js";
 import { SERVER_MIN_CLIENT_VERSION } from "./server-info.js";
@@ -366,6 +367,46 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
        WHERE excluded.updated_at > sync_media_links.updated_at`,
     );
 
+    // Custom reminders (008). title + body encrypted client-side;
+    // schedule fields cleartext so the server can validate / log them
+    // without decrypting. LWW on updated_at like every other table.
+    const upsertReminder = stmts.prepare<
+      [
+        string,        // uuid
+        string,        // user_id
+        string,        // title (encrypted)
+        string | null, // body (encrypted or null)
+        string,        // kind
+        string | null, // fire_at
+        string | null, // weekdays
+        string | null, // time_of_day
+        string | null, // start_date
+        string | null, // end_date
+        number,        // enabled
+        number,        // deleted
+        string,        // updated_at
+      ]
+    >(
+      `INSERT INTO sync_reminders (
+         uuid, user_id, title, body, kind, fire_at, weekdays, time_of_day,
+         start_date, end_date, enabled, deleted, updated_at
+       )
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(uuid) DO UPDATE SET
+         title = excluded.title,
+         body = excluded.body,
+         kind = excluded.kind,
+         fire_at = excluded.fire_at,
+         weekdays = excluded.weekdays,
+         time_of_day = excluded.time_of_day,
+         start_date = excluded.start_date,
+         end_date = excluded.end_date,
+         enabled = excluded.enabled,
+         deleted = excluded.deleted,
+         updated_at = excluded.updated_at
+       WHERE excluded.updated_at > sync_reminders.updated_at`,
+    );
+
     const updateDeviceSync = stmts.prepare<[string, string, string]>(
       "UPDATE devices SET last_sync_at = ? WHERE id = ? AND user_id = ?",
     );
@@ -491,6 +532,23 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
           ml.last_seen,
           ml.deleted,
           ml.updated_at || now,
+        );
+      }
+      for (const r of (body.reminders ?? []).slice(0, BATCH_SIZE)) {
+        upsertReminder.run(
+          r.uuid,
+          userId,
+          r.title,
+          r.body ?? null,
+          r.kind,
+          r.fire_at ?? null,
+          r.weekdays ?? null,
+          r.time_of_day ?? null,
+          r.start_date ?? null,
+          r.end_date ?? null,
+          r.enabled,
+          r.deleted,
+          r.updated_at || now,
         );
       }
       updateDeviceSync.run(now, auth.device_id, userId);
@@ -693,6 +751,35 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
           )
           .all(userId, cursor, BATCH_SIZE);
 
+    // Custom reminders (008). Same compound-cursor hazard as media
+    // links — a user creating several reminders in quick succession
+    // clusters them at the same `now`. Tiebreaker is `uuid`. Legacy
+    // fallback uses the shared time cursor for clients that pre-date
+    // the compound cursor.
+    const reminderCursor = body.reminder_cursor;
+    const reminders = reminderCursor
+      ? fastify.db
+          .prepare<[string, string, string, string, number], SyncReminder>(
+            `SELECT uuid, title, body, kind, fire_at, weekdays, time_of_day,
+                    start_date, end_date, enabled, deleted, updated_at
+             FROM sync_reminders
+             WHERE user_id = ?
+               AND (updated_at > ? OR (updated_at = ? AND uuid > ?))
+             ORDER BY updated_at ASC, uuid ASC
+             LIMIT ?`,
+          )
+          .all(userId, reminderCursor.updated_at, reminderCursor.updated_at, reminderCursor.key, BATCH_SIZE)
+      : fastify.db
+          .prepare<[string, string, number], SyncReminder>(
+            `SELECT uuid, title, body, kind, fire_at, weekdays, time_of_day,
+                    start_date, end_date, enabled, deleted, updated_at
+             FROM sync_reminders
+             WHERE user_id = ? AND updated_at > ?
+             ORDER BY updated_at ASC, uuid ASC
+             LIMIT ?`,
+          )
+          .all(userId, cursor, BATCH_SIZE);
+
     fastify.db
       .prepare<[string, string, string]>(
         "UPDATE devices SET last_sync_at = ? WHERE id = ? AND user_id = ?",
@@ -713,6 +800,7 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
     const hitLimitSettings = settings.length >= SETTING_LIMIT;
     const hitLimitTse = tagStickyExclusions.length >= BATCH_SIZE;
     const hitLimitMediaLinks = mediaLinks.length >= BATCH_SIZE;
+    const hitLimitReminders = reminders.length >= BATCH_SIZE;
 
     let newCursor = now;
     if (hitLimitTimeTypes) {
@@ -751,6 +839,12 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
           key: mediaLinks[mediaLinks.length - 1]!.uuid,
         }
       : undefined;
+    const nextReminderCursor = hitLimitReminders && reminders.length > 0
+      ? {
+          updated_at: reminders[reminders.length - 1]!.updated_at,
+          key: reminders[reminders.length - 1]!.uuid,
+        }
+      : undefined;
 
     const response: PullResponse = {
       entries,
@@ -763,12 +857,20 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
       settings,
       tag_sticky_exclusions: tagStickyExclusions,
       media_links: mediaLinks,
+      reminders,
       cursor: newCursor,
-      has_more: hitLimitTimeTypes || hitLimitIcons || hitLimitSettings || hitLimitTse || hitLimitMediaLinks,
+      has_more:
+        hitLimitTimeTypes ||
+        hitLimitIcons ||
+        hitLimitSettings ||
+        hitLimitTse ||
+        hitLimitMediaLinks ||
+        hitLimitReminders,
       ...(nextIconCursor ? { icon_cursor: nextIconCursor } : {}),
       ...(nextSettingCursor ? { setting_cursor: nextSettingCursor } : {}),
       ...(nextTseCursor ? { tag_sticky_exclusion_cursor: nextTseCursor } : {}),
       ...(nextMediaLinkCursor ? { media_link_cursor: nextMediaLinkCursor } : {}),
+      ...(nextReminderCursor ? { reminder_cursor: nextReminderCursor } : {}),
     };
     return reply.send(response);
   });
@@ -809,6 +911,7 @@ export function wipeUserSyncRows(db: Database.Database, userId: string): void {
     "sync_settings",
     "sync_tag_sticky_exclusions",
     "sync_media_links",
+    "sync_reminders",
   ];
   const tx = db.transaction(() => {
     for (const t of tables) {
