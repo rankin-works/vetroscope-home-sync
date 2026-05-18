@@ -158,6 +158,7 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
         string | null,
         string | null,
         number,
+        number,
         string,
       ]
     >(
@@ -165,9 +166,10 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
       // encrypted client-side. parent_uuid (005) is the cross-device
       // parent reference for nested tags — cleartext because tag uuids
       // carry no user-identifying data. Both refresh on conflict so a
-      // later push can correct or clear them.
-      `INSERT INTO sync_tags (uuid, user_id, name, color, sticky, icon_data_url, parent_uuid, deleted, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      // later push can correct or clear them. archived (008) marks the
+      // tag hidden-but-preserved client-side.
+      `INSERT INTO sync_tags (uuid, user_id, name, color, sticky, icon_data_url, parent_uuid, deleted, archived, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(uuid) DO UPDATE SET
          name = excluded.name,
          color = excluded.color,
@@ -175,6 +177,7 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
          icon_data_url = excluded.icon_data_url,
          parent_uuid = excluded.parent_uuid,
          deleted = excluded.deleted,
+         archived = excluded.archived,
          updated_at = excluded.updated_at
        WHERE excluded.updated_at > sync_tags.updated_at`,
     );
@@ -439,6 +442,7 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
           t.icon_data_url ?? null,
           t.parent_uuid ?? null,
           t.deleted,
+          t.archived ?? 0,
           t.updated_at || now,
         );
       }
@@ -588,7 +592,7 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
 
     const tags = fastify.db
       .prepare<[string, string, number], SyncTag>(
-        `SELECT uuid, name, color, sticky, icon_data_url, parent_uuid, deleted, updated_at
+        `SELECT uuid, name, color, sticky, icon_data_url, parent_uuid, deleted, archived, updated_at
          FROM sync_tags
          WHERE user_id = ? AND updated_at > ?
          ORDER BY updated_at ASC

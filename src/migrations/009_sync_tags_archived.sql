@@ -1,0 +1,21 @@
+-- SPDX-License-Identifier: Apache-2.0
+-- Migration 009: archive bit on sync_tags.
+--
+-- Archived tags stay attached to historical entries on the client
+-- so past tag attribution survives on the calendar / timeline /
+-- charts, but they're hidden from every default tag picker and the
+-- forward-only auto-apply paths refuse to use them. This column
+-- carries that state across devices alongside `deleted`.
+--
+-- Distinct from `deleted`:
+--   * deleted = 1 → row is a tombstone, hard-removed once every
+--     bound target acks it.
+--   * archived = 1 → row stays alive indefinitely; UI dims it and
+--     blocks new assignments.
+--
+-- Pre-009 servers received no `archived` field on push; pre-009
+-- clients drop the column on pull. The client's apply block
+-- defaults to 0 when the field is absent, so mixing versions
+-- across devices is safe.
+
+ALTER TABLE sync_tags ADD COLUMN archived INTEGER NOT NULL DEFAULT 0;

@@ -108,6 +108,11 @@ export interface SyncTag {
   // pre-005 servers drop it on push.
   parent_uuid?: string | null;
   deleted: number;
+  // Archived tags stay attached to past entries client-side but are
+  // hidden from default tag pickers and refuse new assignments.
+  // Optional on the wire — pre-008 servers drop it. Added in
+  // migration 008 (Home Sync) / 022 (Cloud).
+  archived?: number;
   updated_at: string;
 }
 
