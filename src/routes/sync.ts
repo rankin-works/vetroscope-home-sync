@@ -387,14 +387,15 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
         string | null, // end_date
         number,        // enabled
         number,        // deleted
+        string | null, // last_fired_at
         string,        // updated_at
       ]
     >(
       `INSERT INTO sync_reminders (
          uuid, user_id, title, body, kind, fire_at, weekdays, time_of_day,
-         start_date, end_date, enabled, deleted, updated_at
+         start_date, end_date, enabled, deleted, last_fired_at, updated_at
        )
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(uuid) DO UPDATE SET
          title = excluded.title,
          body = excluded.body,
@@ -406,6 +407,7 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
          end_date = excluded.end_date,
          enabled = excluded.enabled,
          deleted = excluded.deleted,
+         last_fired_at = excluded.last_fired_at,
          updated_at = excluded.updated_at
        WHERE excluded.updated_at > sync_reminders.updated_at`,
     );
@@ -552,6 +554,7 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
           r.end_date ?? null,
           r.enabled,
           r.deleted,
+          r.last_fired_at ?? null,
           r.updated_at || now,
         );
       }
@@ -765,7 +768,7 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
       ? fastify.db
           .prepare<[string, string, string, string, number], SyncReminder>(
             `SELECT uuid, title, body, kind, fire_at, weekdays, time_of_day,
-                    start_date, end_date, enabled, deleted, updated_at
+                    start_date, end_date, enabled, deleted, last_fired_at, updated_at
              FROM sync_reminders
              WHERE user_id = ?
                AND (updated_at > ? OR (updated_at = ? AND uuid > ?))
@@ -776,7 +779,7 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
       : fastify.db
           .prepare<[string, string, number], SyncReminder>(
             `SELECT uuid, title, body, kind, fire_at, weekdays, time_of_day,
-                    start_date, end_date, enabled, deleted, updated_at
+                    start_date, end_date, enabled, deleted, last_fired_at, updated_at
              FROM sync_reminders
              WHERE user_id = ? AND updated_at > ?
              ORDER BY updated_at ASC, uuid ASC

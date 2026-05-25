@@ -155,6 +155,12 @@ export interface SyncReminder {
   end_date: string | null;
   enabled: number;
   deleted: number;
+  /** ISO timestamp set by the client when the reminder fires.
+   *  Replicated across devices (010) so a reminder that already
+   *  fired on one device doesn't refire on another that comes
+   *  online later. Optional on the wire — pre-010 servers and
+   *  pre-fix clients omit it. */
+  last_fired_at?: string | null;
   updated_at: string;
 }
 
