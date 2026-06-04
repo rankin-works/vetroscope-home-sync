@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
+import { readFileSync } from "node:fs";
+
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { createHarness, type Harness } from "./harness.js";
@@ -97,5 +99,17 @@ describe("/setup", () => {
     const body = res.json();
     expect(typeof body.min_client_version).toBe("string");
     expect(body.min_client_version).toMatch(/^\d+\.\d+\.\d+/);
+  });
+
+  it("/server-info advertises the package.json version", async () => {
+    // version.ts is a hand-maintained mirror of package.json (kept in code
+    // so a commit-pinned build has a deterministic version). It has been
+    // forgotten on release before — leaving the server advertising a stale
+    // version to clients. Fail the build if the two ever drift again.
+    const pkg = JSON.parse(
+      readFileSync(new URL("../../package.json", import.meta.url), "utf8"),
+    ) as { version: string };
+    const res = await h.app.inject({ method: "GET", url: "/server-info" });
+    expect(res.json().version).toBe(pkg.version);
   });
 });
