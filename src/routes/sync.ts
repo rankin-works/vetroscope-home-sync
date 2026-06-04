@@ -49,8 +49,10 @@ const SETTING_LIMIT = 100;
 
 // Allowlist of sync-eligible setting keys. The client has historically
 // attempted to push additional keys; rejecting unknown ones keeps the
-// server-side schema stable and the payload bounded.
-const SYNCED_SETTING_KEYS = new Set(["ignored_apps", "ignored_projects", "ignored_breakdown_patterns"]);
+// server-side schema stable and the payload bounded. Mirrors the client
+// allowlist (electron/settings.ts) and the cloud API — a key missing here is
+// silently rejected on push even when the client sends it.
+const SYNCED_SETTING_KEYS = new Set(["ignored_apps", "ignored_projects", "ignored_breakdown_patterns", "ignored_sub_projects"]);
 
 export const syncRoutes: FastifyPluginAsync = async (fastify) => {
   fastify.addHook("preHandler", fastify.authenticate);
