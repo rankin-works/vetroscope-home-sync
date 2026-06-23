@@ -100,6 +100,12 @@ export interface SyncTag {
   name: string;
   color: string;
   sticky: number;
+  /** Opt-in: auto-tag new sub-breakdowns under tagged breakdowns.
+   *  Added in 011 (Cloud 027). Pre-011 servers drop on push. */
+  sticky_subprojects?: number;
+  /** Opt-in: auto-tag new breakdowns under tagged apps.
+   *  Added in 011 (Cloud 028). Pre-011 servers drop on push. */
+  sticky_projects?: number;
   // Optional user-uploaded tag icon (encrypted data URL). Added in 005.
   // Pre-005 servers don't surface it on pull.
   icon_data_url?: string | null;
@@ -121,6 +127,25 @@ export interface SyncTagStickyExclusion {
   tag_uuid: string | null;
   app_name: string;     // encrypted client-side
   project: string | null; // encrypted client-side, null when scope has no breakdown
+  deleted: number;
+  updated_at: string;
+}
+
+/** Per-app allowlist for sticky_projects auto-tagging. Added in 011. */
+export interface SyncTagStickyProjectApp {
+  uuid: string;
+  tag_uuid: string | null;
+  app_name: string;     // encrypted client-side
+  deleted: number;
+  updated_at: string;
+}
+
+/** Per-breakdown allowlist for sticky_subprojects auto-tagging. Added in 011. */
+export interface SyncTagStickySubprojectScope {
+  uuid: string;
+  tag_uuid: string | null;
+  app_name: string;     // encrypted client-side
+  project: string;      // encrypted client-side
   deleted: number;
   updated_at: string;
 }
@@ -238,6 +263,10 @@ export interface PushPayload {
   // Per-(tag, app, project) sticky-exclusion tombstones. Added in 005.
   // Pre-005 servers silently drop this collection.
   tag_sticky_exclusions?: SyncTagStickyExclusion[];
+  // Per-app / per-breakdown auto-tag allowlists. Added in 011.
+  // Pre-011 servers silently drop these collections.
+  tag_sticky_project_apps?: SyncTagStickyProjectApp[];
+  tag_sticky_subproject_scopes?: SyncTagStickySubprojectScope[];
   // Captured media URLs (Spotify track URIs, YouTube /watch URLs).
   // Added in 007. Pre-007 servers silently drop this collection.
   media_links?: SyncMediaLink[];
@@ -273,6 +302,10 @@ export interface PullPayload {
   // icons + settings — a bulk re-push during Reset Cloud Data stamps
   // every row with the same `now`. Compound cursor on (updated_at, uuid).
   tag_sticky_exclusion_cursor?: CompoundCursor | null;
+  // Per-app / per-breakdown auto-tag allowlists. Compound cursor on
+  // (updated_at, uuid) — bulk re-push can cluster timestamps. Added in 011.
+  tag_sticky_project_app_cursor?: CompoundCursor | null;
+  tag_sticky_subproject_scope_cursor?: CompoundCursor | null;
   // Captured media URLs paginate by compound cursor on (updated_at,
   // uuid) — a fresh capture-enabled device pushes its whole library
   // in one shot which clusters timestamps. Sent by clients running
@@ -297,6 +330,10 @@ export interface PullResponse {
   // Per-(tag, app, project) sticky-exclusion tombstones. Empty when the
   // server predates 005 or when the user has no exclusions. Added in 005.
   tag_sticky_exclusions?: SyncTagStickyExclusion[];
+  // Per-app / per-breakdown auto-tag allowlists. Empty when the server
+  // predates 011. Added in 011.
+  tag_sticky_project_apps?: SyncTagStickyProjectApp[];
+  tag_sticky_subproject_scopes?: SyncTagStickySubprojectScope[];
   // Captured media URLs. Empty when the server predates 007, when the
   // pushing device(s) haven't opted into media-link sync, or when no
   // captured rows exist for the user. Added in 007.
@@ -314,6 +351,9 @@ export interface PullResponse {
   setting_cursor?: CompoundCursor;
   // Added in 005 alongside the sync_tag_sticky_exclusions table.
   tag_sticky_exclusion_cursor?: CompoundCursor;
+  // Added in 011 alongside the allowlist tables.
+  tag_sticky_project_app_cursor?: CompoundCursor;
+  tag_sticky_subproject_scope_cursor?: CompoundCursor;
   // Added in 007 alongside the sync_media_links table.
   media_link_cursor?: CompoundCursor;
   // Added in 008 alongside the sync_reminders table.

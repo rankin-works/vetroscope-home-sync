@@ -500,6 +500,95 @@ describe("/sync", () => {
     expect(byUuid.get("tag-child")!.icon_data_url).toBe("enc-icon-data-url");
   });
 
+  it("tag push round-trips sticky_subprojects and sticky_projects", async () => {
+    // 011 added both columns (Cloud 027 + 028). Before 011 they were
+    // silently dropped on push and never returned on pull.
+    const admin = await bootstrapAdmin(h);
+    const tag = {
+      uuid: "tag-auto",
+      name: "enc-music",
+      color: "#22c55e",
+      sticky: 1,
+      sticky_subprojects: 1,
+      sticky_projects: 1,
+      icon_data_url: null,
+      parent_uuid: null,
+      deleted: 0,
+      updated_at: "2026-04-30T08:00:00.000Z",
+    };
+    await h.app.inject({
+      method: "POST",
+      url: "/sync/push",
+      headers: { authorization: `Bearer ${admin.accessToken}` },
+      payload: { tags: [tag] },
+    });
+    const pull = await h.app.inject({
+      method: "POST",
+      url: "/sync/pull",
+      headers: { authorization: `Bearer ${admin.accessToken}` },
+      payload: { cursor: null, device_id: "other-device" },
+    });
+    const rows = pull.json().tags as Array<typeof tag>;
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.sticky_subprojects).toBe(1);
+    expect(rows[0]!.sticky_projects).toBe(1);
+  });
+
+  it("sync_tag_sticky_project_apps round-trips through push + pull", async () => {
+    const admin = await bootstrapAdmin(h);
+    const spa = {
+      uuid: "spa-1",
+      tag_uuid: "tag-abc",
+      app_name: "enc-Chrome",
+      deleted: 0,
+      updated_at: "2026-04-30T08:00:00.000Z",
+    };
+    await h.app.inject({
+      method: "POST",
+      url: "/sync/push",
+      headers: { authorization: `Bearer ${admin.accessToken}` },
+      payload: { tag_sticky_project_apps: [spa] },
+    });
+    const pull = await h.app.inject({
+      method: "POST",
+      url: "/sync/pull",
+      headers: { authorization: `Bearer ${admin.accessToken}` },
+      payload: { cursor: null, device_id: "other-device" },
+    });
+    const rows = pull.json().tag_sticky_project_apps as Array<typeof spa>;
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.uuid).toBe("spa-1");
+    expect(rows[0]!.app_name).toBe("enc-Chrome");
+  });
+
+  it("sync_tag_sticky_subproject_scopes round-trips through push + pull", async () => {
+    const admin = await bootstrapAdmin(h);
+    const sss = {
+      uuid: "sss-1",
+      tag_uuid: "tag-abc",
+      app_name: "enc-Chrome",
+      project: "enc-youtube.com",
+      deleted: 0,
+      updated_at: "2026-04-30T08:00:00.000Z",
+    };
+    await h.app.inject({
+      method: "POST",
+      url: "/sync/push",
+      headers: { authorization: `Bearer ${admin.accessToken}` },
+      payload: { tag_sticky_subproject_scopes: [sss] },
+    });
+    const pull = await h.app.inject({
+      method: "POST",
+      url: "/sync/pull",
+      headers: { authorization: `Bearer ${admin.accessToken}` },
+      payload: { cursor: null, device_id: "other-device" },
+    });
+    const rows = pull.json().tag_sticky_subproject_scopes as Array<typeof sss>;
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.uuid).toBe("sss-1");
+    expect(rows[0]!.project).toBe("enc-youtube.com");
+  });
+
   it("entry push round-trips sub_project", async () => {
     // 005 added sub_project to sync_entries (browser-extension third-
     // level breakdown — videos under YouTube, songs under Spotify Web).

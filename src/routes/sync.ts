@@ -31,6 +31,8 @@ import type {
   SyncSetting,
   SyncTag,
   SyncTagStickyExclusion,
+  SyncTagStickyProjectApp,
+  SyncTagStickySubprojectScope,
   SyncMediaLink,
   SyncReminder,
 } from "../types.js";
@@ -157,6 +159,8 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
         string,
         string,
         number,
+        number,
+        number,
         string | null,
         string | null,
         number,
@@ -167,15 +171,18 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
       // icon_data_url (005) is an optional user-uploaded tag icon,
       // encrypted client-side. parent_uuid (005) is the cross-device
       // parent reference for nested tags — cleartext because tag uuids
-      // carry no user-identifying data. Both refresh on conflict so a
-      // later push can correct or clear them. archived (008) marks the
-      // tag hidden-but-preserved client-side.
-      `INSERT INTO sync_tags (uuid, user_id, name, color, sticky, icon_data_url, parent_uuid, deleted, archived, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      // carry no user-identifying data. sticky_subprojects (011) and
+      // sticky_projects (011) gate opt-in auto-tagging of new
+      // sub-breakdowns / breakdowns. archived (008) marks the tag
+      // hidden-but-preserved client-side.
+      `INSERT INTO sync_tags (uuid, user_id, name, color, sticky, sticky_subprojects, sticky_projects, icon_data_url, parent_uuid, deleted, archived, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(uuid) DO UPDATE SET
          name = excluded.name,
          color = excluded.color,
          sticky = excluded.sticky,
+         sticky_subprojects = excluded.sticky_subprojects,
+         sticky_projects = excluded.sticky_projects,
          icon_data_url = excluded.icon_data_url,
          parent_uuid = excluded.parent_uuid,
          deleted = excluded.deleted,
@@ -336,6 +343,50 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
        WHERE excluded.updated_at > sync_tag_sticky_exclusions.updated_at`,
     );
 
+    // Per-app allowlist rows for sticky_projects auto-tagging (011).
+    const upsertTagStickyProjectApp = stmts.prepare<
+      [
+        string,
+        string,
+        string | null,
+        string,
+        number,
+        string,
+      ]
+    >(
+      `INSERT INTO sync_tag_sticky_project_apps (uuid, user_id, tag_uuid, app_name, deleted, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT(uuid) DO UPDATE SET
+         tag_uuid = excluded.tag_uuid,
+         app_name = excluded.app_name,
+         deleted = excluded.deleted,
+         updated_at = excluded.updated_at
+       WHERE excluded.updated_at > sync_tag_sticky_project_apps.updated_at`,
+    );
+
+    // Per-breakdown allowlist rows for sticky_subprojects auto-tagging (011).
+    const upsertTagStickySubprojectScope = stmts.prepare<
+      [
+        string,
+        string,
+        string | null,
+        string,
+        string,
+        number,
+        string,
+      ]
+    >(
+      `INSERT INTO sync_tag_sticky_subproject_scopes (uuid, user_id, tag_uuid, app_name, project, deleted, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(uuid) DO UPDATE SET
+         tag_uuid = excluded.tag_uuid,
+         app_name = excluded.app_name,
+         project = excluded.project,
+         deleted = excluded.deleted,
+         updated_at = excluded.updated_at
+       WHERE excluded.updated_at > sync_tag_sticky_subproject_scopes.updated_at`,
+    );
+
     // Captured media URLs (Spotify track URIs, YouTube /watch URLs).
     // app_name / project / sub_project / url are encrypted client-side;
     // kind is cleartext for aggregate logging. LWW on updated_at like
@@ -443,6 +494,8 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
           t.name,
           t.color,
           t.sticky,
+          t.sticky_subprojects ?? 0,
+          t.sticky_projects ?? 0,
           t.icon_data_url ?? null,
           t.parent_uuid ?? null,
           t.deleted,
@@ -527,6 +580,27 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
           tse.updated_at || now,
         );
       }
+      for (const spa of (body.tag_sticky_project_apps ?? []).slice(0, BATCH_SIZE)) {
+        upsertTagStickyProjectApp.run(
+          spa.uuid,
+          userId,
+          spa.tag_uuid ?? null,
+          spa.app_name,
+          spa.deleted,
+          spa.updated_at || now,
+        );
+      }
+      for (const sss of (body.tag_sticky_subproject_scopes ?? []).slice(0, BATCH_SIZE)) {
+        upsertTagStickySubprojectScope.run(
+          sss.uuid,
+          userId,
+          sss.tag_uuid ?? null,
+          sss.app_name,
+          sss.project,
+          sss.deleted,
+          sss.updated_at || now,
+        );
+      }
       for (const ml of (body.media_links ?? []).slice(0, BATCH_SIZE)) {
         upsertMediaLink.run(
           ml.uuid,
@@ -597,7 +671,7 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
 
     const tags = fastify.db
       .prepare<[string, string, number], SyncTag>(
-        `SELECT uuid, name, color, sticky, icon_data_url, parent_uuid, deleted, archived, updated_at
+        `SELECT uuid, name, color, sticky, sticky_subprojects, sticky_projects, icon_data_url, parent_uuid, deleted, archived, updated_at
          FROM sync_tags
          WHERE user_id = ? AND updated_at > ?
          ORDER BY updated_at ASC
@@ -733,6 +807,53 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
           )
           .all(userId, cursor, BATCH_SIZE);
 
+    // Per-app allowlist for sticky_projects (011). Same compound-cursor
+    // pattern as sticky exclusions — bulk re-push can cluster timestamps.
+    const spaCursor = body.tag_sticky_project_app_cursor;
+    const tagStickyProjectApps = spaCursor
+      ? fastify.db
+          .prepare<[string, string, string, string, number], SyncTagStickyProjectApp>(
+            `SELECT uuid, tag_uuid, app_name, deleted, updated_at
+             FROM sync_tag_sticky_project_apps
+             WHERE user_id = ?
+               AND (updated_at > ? OR (updated_at = ? AND uuid > ?))
+             ORDER BY updated_at ASC, uuid ASC
+             LIMIT ?`,
+          )
+          .all(userId, spaCursor.updated_at, spaCursor.updated_at, spaCursor.key, BATCH_SIZE)
+      : fastify.db
+          .prepare<[string, string, number], SyncTagStickyProjectApp>(
+            `SELECT uuid, tag_uuid, app_name, deleted, updated_at
+             FROM sync_tag_sticky_project_apps
+             WHERE user_id = ? AND updated_at > ?
+             ORDER BY updated_at ASC, uuid ASC
+             LIMIT ?`,
+          )
+          .all(userId, cursor, BATCH_SIZE);
+
+    // Per-breakdown allowlist for sticky_subprojects (011).
+    const sssCursor = body.tag_sticky_subproject_scope_cursor;
+    const tagStickySubprojectScopes = sssCursor
+      ? fastify.db
+          .prepare<[string, string, string, string, number], SyncTagStickySubprojectScope>(
+            `SELECT uuid, tag_uuid, app_name, project, deleted, updated_at
+             FROM sync_tag_sticky_subproject_scopes
+             WHERE user_id = ?
+               AND (updated_at > ? OR (updated_at = ? AND uuid > ?))
+             ORDER BY updated_at ASC, uuid ASC
+             LIMIT ?`,
+          )
+          .all(userId, sssCursor.updated_at, sssCursor.updated_at, sssCursor.key, BATCH_SIZE)
+      : fastify.db
+          .prepare<[string, string, number], SyncTagStickySubprojectScope>(
+            `SELECT uuid, tag_uuid, app_name, project, deleted, updated_at
+             FROM sync_tag_sticky_subproject_scopes
+             WHERE user_id = ? AND updated_at > ?
+             ORDER BY updated_at ASC, uuid ASC
+             LIMIT ?`,
+          )
+          .all(userId, cursor, BATCH_SIZE);
+
     // Captured media URLs (007). Same compound-cursor treatment as
     // sticky exclusions — a fresh capture-enabled device may push its
     // entire library in one shot which clusters every row at the same
@@ -808,6 +929,8 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
     const hitLimitIcons = icons.length >= ICON_LIMIT;
     const hitLimitSettings = settings.length >= SETTING_LIMIT;
     const hitLimitTse = tagStickyExclusions.length >= BATCH_SIZE;
+    const hitLimitSpa = tagStickyProjectApps.length >= BATCH_SIZE;
+    const hitLimitSss = tagStickySubprojectScopes.length >= BATCH_SIZE;
     const hitLimitMediaLinks = mediaLinks.length >= BATCH_SIZE;
     const hitLimitReminders = reminders.length >= BATCH_SIZE;
 
@@ -842,6 +965,18 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
           key: tagStickyExclusions[tagStickyExclusions.length - 1]!.uuid,
         }
       : undefined;
+    const nextSpaCursor = hitLimitSpa && tagStickyProjectApps.length > 0
+      ? {
+          updated_at: tagStickyProjectApps[tagStickyProjectApps.length - 1]!.updated_at,
+          key: tagStickyProjectApps[tagStickyProjectApps.length - 1]!.uuid,
+        }
+      : undefined;
+    const nextSssCursor = hitLimitSss && tagStickySubprojectScopes.length > 0
+      ? {
+          updated_at: tagStickySubprojectScopes[tagStickySubprojectScopes.length - 1]!.updated_at,
+          key: tagStickySubprojectScopes[tagStickySubprojectScopes.length - 1]!.uuid,
+        }
+      : undefined;
     const nextMediaLinkCursor = hitLimitMediaLinks && mediaLinks.length > 0
       ? {
           updated_at: mediaLinks[mediaLinks.length - 1]!.updated_at,
@@ -865,6 +1000,8 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
       overrides,
       settings,
       tag_sticky_exclusions: tagStickyExclusions,
+      tag_sticky_project_apps: tagStickyProjectApps,
+      tag_sticky_subproject_scopes: tagStickySubprojectScopes,
       media_links: mediaLinks,
       reminders,
       cursor: newCursor,
@@ -873,11 +1010,15 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
         hitLimitIcons ||
         hitLimitSettings ||
         hitLimitTse ||
+        hitLimitSpa ||
+        hitLimitSss ||
         hitLimitMediaLinks ||
         hitLimitReminders,
       ...(nextIconCursor ? { icon_cursor: nextIconCursor } : {}),
       ...(nextSettingCursor ? { setting_cursor: nextSettingCursor } : {}),
       ...(nextTseCursor ? { tag_sticky_exclusion_cursor: nextTseCursor } : {}),
+      ...(nextSpaCursor ? { tag_sticky_project_app_cursor: nextSpaCursor } : {}),
+      ...(nextSssCursor ? { tag_sticky_subproject_scope_cursor: nextSssCursor } : {}),
       ...(nextMediaLinkCursor ? { media_link_cursor: nextMediaLinkCursor } : {}),
       ...(nextReminderCursor ? { reminder_cursor: nextReminderCursor } : {}),
     };
@@ -919,6 +1060,8 @@ export function wipeUserSyncRows(db: Database.Database, userId: string): void {
     "sync_overrides",
     "sync_settings",
     "sync_tag_sticky_exclusions",
+    "sync_tag_sticky_project_apps",
+    "sync_tag_sticky_subproject_scopes",
     "sync_media_links",
     "sync_reminders",
   ];
