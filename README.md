@@ -1,19 +1,16 @@
 # Vetroscope Home Sync
 
 Self-hosted sync server for [Vetroscope](https://vetroscope.com), the
-privacy-first time-tracking menu-bar app. Deploy it on your own
-hardware — a NAS, a home server, a Raspberry Pi, an always-on
-workstation — and point your Vetroscope clients at it instead of
-Vetroscope Cloud. Your data never leaves your network.
+privacy-first, cross platform screen time tracking app. Deploy it on your own
+hardware such as a NAS, VPS, a Raspberry Pi, or any always-on
+workstation you trust. Point your Vetroscope clients at it's IP in Vetroscope's sync settings.
+Works for licensed Vetroscope users, and Vetroscope Pro subscribers. Can be used in conjunction with Vetroscope Cloud sync.
 
 - **Open source.** Apache 2.0.
 - **End-to-end encrypted.** Sensitive fields (app names, window
   titles, project names) are encrypted client-side before upload.
   Even a compromised server can't read them.
-- **No telemetry.** The server never talks to vetroscope.com. No
-  pings, no checkins.
-- **First-class in the client.** Unlocked for Vetroscope Licensed and
-  Pro users. One toggle in Settings → Sync.
+- **No telemetry.** Totally isolated from api.vetroscope.com
 
 ## Status
 
@@ -22,9 +19,6 @@ the Vetroscope Cloud API surface: setup, auth, sync, user
 management, invites, and an admin CLI. Published Docker images and
 client-side integration in the desktop app land next — see
 [`docs/architecture.md`](docs/architecture.md) for the phased plan.
-
-If you're here looking for a stable release, star the repo and come
-back in a few weeks.
 
 ## Quick start (once images are published)
 
@@ -67,7 +61,7 @@ the essentials:
 | `VS_SERVER_NAME`          | `hostname`  | Friendly name shown in the Vetroscope client            |
 | `VS_ALLOW_REGISTRATION`   | `invite`    | `open` \| `invite` \| `closed`                          |
 | `VS_MAX_DEVICES_PER_USER` | `10`        | Per-user device cap                                     |
-| `VS_TLS_CERT`             | unset       | Path to PEM cert; pair with `VS_TLS_KEY` to enable HTTPS |
+| `VS_TLS_CERT`             | unset       | Path to PEM cert; pair with `VS_TLS_KEY` to enable HTTPS
 | `VS_TLS_KEY`              | unset       | Path to PEM key                                         |
 
 ## Documentation
