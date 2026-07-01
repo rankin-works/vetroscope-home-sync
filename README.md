@@ -12,15 +12,7 @@ Works for licensed Vetroscope users, and Vetroscope Pro subscribers. Can be used
   Even a compromised server can't read them.
 - **No telemetry.** Totally isolated from api.vetroscope.com
 
-## Status
-
-**Pre-release.** Server implementation is feature-complete against
-the Vetroscope Cloud API surface: setup, auth, sync, user
-management, invites, and an admin CLI. Published Docker images and
-client-side integration in the desktop app land next — see
-[`docs/architecture.md`](docs/architecture.md) for the phased plan.
-
-## Quick start (once images are published)
+## Quick start
 
 ```bash
 curl -LO https://raw.githubusercontent.com/rankin-works/vetroscope-home-sync/main/docker-compose.yml
