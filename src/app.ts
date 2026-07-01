@@ -69,16 +69,11 @@ export async function buildApp({
     "application/json",
     { parseAs: "string" },
     (request, body, done) => {
-      if (
-        body === "" ||
-        body === null ||
-        body === undefined ||
-        (Buffer.isBuffer(body) && body.length === 0)
-      ) {
+      if (body === "" || body === null || body === undefined) {
         done(null, {});
         return;
       }
-      defaultJsonParser(request, body, done);
+      defaultJsonParser(request, body as string, done);
     },
   );
 
