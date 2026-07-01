@@ -38,7 +38,6 @@ export async function issueTokens(
   jwtSecret: string,
   user: UserRow,
   deviceId: string,
-  scope: "sync" | "web" = "sync",
 ): Promise<IssuedTokens> {
   const now = Math.floor(Date.now() / 1000);
   const payload: JWTPayload = {
@@ -47,7 +46,6 @@ export async function issueTokens(
     plan: user.plan,
     role: user.role,
     device_id: deviceId,
-    scope,
     iat: now,
     exp: now + ACCESS_TOKEN_EXPIRY_SECONDS,
   };

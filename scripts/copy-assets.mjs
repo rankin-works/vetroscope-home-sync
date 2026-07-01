@@ -13,7 +13,6 @@ const repoRoot = resolve(here, "..");
 
 const targets = [
   ["src/migrations", "dist/migrations"],
-  ["src/public", "dist/public"],
 ];
 
 for (const [src, dst] of targets) {

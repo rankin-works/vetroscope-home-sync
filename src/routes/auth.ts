@@ -9,8 +9,6 @@
 //   - registration is env-gated: open / invite / closed
 //   - device limit defaults to 10 and is configurable via env
 
-import { randomUUID } from "node:crypto";
-
 import type { FastifyPluginAsync } from "fastify";
 
 import {
@@ -53,15 +51,6 @@ interface LoginBody {
   device_id?: string;
   platform?: Platform;
   app_version?: string;
-}
-
-interface WebLoginBody {
-  email?: string;
-  password?: string;
-  // Stable per-browser id so refresh-token rotation doesn't kick other
-  // tabs/sessions when this one renews. The web client picks one once
-  // and keeps it in localStorage.
-  session_id?: string;
 }
 
 interface RefreshBody {
@@ -260,54 +249,6 @@ export const authRoutes: FastifyPluginAsync = async (fastify) => {
     },
   );
 
-  // Web-only login. The bundled dashboard is read-only — it never
-  // pushes — so it doesn't deserve a row in `devices`. This path skips
-  // device registration entirely and tags the issued JWT with
-  // scope="web", which /sync/* routes reject. The session_id is just a
-  // stable opaque id the browser persists in localStorage so refresh-
-  // token rotation doesn't fight between tabs of the same browser.
-  fastify.post<{ Body: WebLoginBody }>(
-    "/auth/web-login",
-    { preHandler: limiter },
-    async (request, reply) => {
-      const body = request.body ?? {};
-      const { email, password, session_id } = body;
-      if (!email || !password) {
-        return reply.status(400).send({
-          error: "invalid_request",
-          message: "email and password are required.",
-        });
-      }
-      const user = findUserByEmail(fastify.db, email);
-      if (user === undefined) {
-        return reply.status(401).send({ error: "invalid_credentials" });
-      }
-      const valid = await verifyPassword(
-        password,
-        user.password_hash,
-        user.password_salt,
-      );
-      if (!valid) {
-        return reply.status(401).send({ error: "invalid_credentials" });
-      }
-      const sessionId = session_id && session_id.length > 0
-        ? `web:${session_id}`
-        : `web:${randomUUID()}`;
-      const tokens = await issueTokens(
-        fastify.db,
-        fastify.jwtSecret,
-        user,
-        sessionId,
-        "web",
-      );
-      return reply.send({
-        user: publicUser(user),
-        session_id: sessionId,
-        ...tokens,
-      });
-    },
-  );
-
   fastify.post<{ Body: RefreshBody }>(
     "/auth/refresh",
     { preHandler: limiter },
@@ -351,21 +292,12 @@ export const authRoutes: FastifyPluginAsync = async (fastify) => {
         .prepare<[string]>("DELETE FROM refresh_tokens WHERE token_hash = ?")
         .run(tokenHash);
 
-      // device_id like "web:abc123" identifies a web session; carry the
-      // scope through so the refreshed access token stays read-only.
-      const scope: "sync" | "web" = stored.device_id.startsWith("web:") ? "web" : "sync";
-      // Web sessions don't have a row in `devices`, so the no-op guard
-      // inside recordDeviceAppVersion would still fire its UPDATE for
-      // zero rows. Skip the call entirely for web sessions for clarity.
-      if (scope === "sync") {
-        recordDeviceAppVersion(fastify.db, stored.id, stored.device_id, body.app_version);
-      }
+      recordDeviceAppVersion(fastify.db, stored.id, stored.device_id, body.app_version);
       const tokens = await issueTokens(
         fastify.db,
         fastify.jwtSecret,
         stored,
         stored.device_id,
-        scope,
       );
       return reply.send({
         user: publicUser(stored),
