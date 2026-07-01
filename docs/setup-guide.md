@@ -173,7 +173,7 @@ cd /path/to/vetroscope-home-sync   # wherever your docker-compose.yml lives
 ```
 
 Edit `docker-compose.yml` and bump the image tag to the new version
-(e.g. `image: ghcr.io/rankin-works/vetroscope-home-sync:0.1.2`).
+(e.g. `image: ghcr.io/rankin-works/vetroscope-home-sync:0.1.3`).
 Then:
 
 ```bash

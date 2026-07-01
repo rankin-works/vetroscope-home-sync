@@ -264,6 +264,33 @@ describe("/sync", () => {
     expect(otherRows.n).toBe(1);
   });
 
+  it("/sync/reset accepts an empty application/json body (Vetroscope client)", async () => {
+    const admin = await bootstrapAdmin(h);
+    await h.app.inject({
+      method: "POST",
+      url: "/sync/push",
+      headers: { authorization: `Bearer ${admin.accessToken}` },
+      payload: {
+        entries: [entry("e1", admin.deviceId, "2026-04-23T00:00:00.000Z")],
+      },
+    });
+
+    const reset = await h.app.inject({
+      method: "POST",
+      url: "/sync/reset",
+      headers: {
+        authorization: `Bearer ${admin.accessToken}`,
+        "content-type": "application/json",
+      },
+    });
+    expect(reset.statusCode).toBe(200);
+
+    const rows = h.db
+      .prepare("SELECT COUNT(*) AS n FROM sync_entries WHERE user_id = ?")
+      .get(admin.userId) as { n: number };
+    expect(rows.n).toBe(0);
+  });
+
   it("unauthenticated sync requests 401", async () => {
     const res = await h.app.inject({
       method: "POST",

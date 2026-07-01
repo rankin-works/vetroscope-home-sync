@@ -60,6 +60,27 @@ export async function buildApp({
     bodyLimit: 10 * 1024 * 1024, // 10 MB — icons payloads can be chunky
   });
 
+  // The Vetroscope client POSTs to body-less endpoints like /sync/reset with
+  // Content-Type: application/json and no payload. Fastify's default parser
+  // rejects that before the route runs; treat an empty body as {} instead.
+  const defaultJsonParser = app.getDefaultJsonParser("error", "error");
+  app.removeContentTypeParser("application/json");
+  app.addContentTypeParser(
+    "application/json",
+    { parseAs: "string" },
+    (request, body, done) => {
+      if (
+        body === "" ||
+        body == null ||
+        (Buffer.isBuffer(body) && body.length === 0)
+      ) {
+        done(null, {});
+        return;
+      }
+      defaultJsonParser(request, body, done);
+    },
+  );
+
   app.decorate("db", db);
   app.decorate("config", config);
   app.decorate("jwtSecret", jwtSecret);
