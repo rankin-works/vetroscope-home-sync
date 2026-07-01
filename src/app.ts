@@ -71,7 +71,8 @@ export async function buildApp({
     (request, body, done) => {
       if (
         body === "" ||
-        body == null ||
+        body === null ||
+        body === undefined ||
         (Buffer.isBuffer(body) && body.length === 0)
       ) {
         done(null, {});
