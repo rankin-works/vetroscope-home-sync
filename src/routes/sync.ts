@@ -35,6 +35,7 @@ import type {
   SyncTagStickySubprojectScope,
   SyncMediaLink,
   SyncReminder,
+  SyncEntryDismissal,
 } from "../types.js";
 import { compareSemver } from "../lib/semver.js";
 import { SERVER_MIN_CLIENT_VERSION } from "./server-info.js";
@@ -451,6 +452,17 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
        WHERE excluded.updated_at > sync_reminders.updated_at`,
     );
 
+    const upsertEntryDismissal = stmts.prepare<
+      [string, string, number, string]
+    >(
+      `INSERT INTO sync_entry_dismissals (uuid, user_id, deleted, updated_at)
+       VALUES (?, ?, ?, ?)
+       ON CONFLICT(uuid) DO UPDATE SET
+         deleted = excluded.deleted,
+         updated_at = excluded.updated_at
+       WHERE excluded.updated_at > sync_entry_dismissals.updated_at`,
+    );
+
     const updateDeviceSync = stmts.prepare<[string, string, string]>(
       "UPDATE devices SET last_sync_at = ? WHERE id = ? AND user_id = ?",
     );
@@ -618,6 +630,14 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
           r.deleted,
           r.last_fired_at ?? null,
           r.updated_at || now,
+        );
+      }
+      for (const d of (body.entry_dismissals ?? []).slice(0, BATCH_SIZE)) {
+        upsertEntryDismissal.run(
+          d.uuid,
+          userId,
+          d.deleted,
+          d.updated_at || now,
         );
       }
       updateDeviceSync.run(now, auth.device_id, userId);
@@ -896,6 +916,30 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
           )
           .all(userId, cursor, BATCH_SIZE);
 
+    // Dispute-time-block tombstones (012). Compound cursor — a single
+    // dismiss can tombstone several entry UUIDs at the same updated_at.
+    const entryDismissalCursor = body.entry_dismissal_cursor;
+    const entryDismissals = entryDismissalCursor
+      ? fastify.db
+          .prepare<[string, string, string, string, number], SyncEntryDismissal>(
+            `SELECT uuid, deleted, updated_at
+             FROM sync_entry_dismissals
+             WHERE user_id = ?
+               AND (updated_at > ? OR (updated_at = ? AND uuid > ?))
+             ORDER BY updated_at ASC, uuid ASC
+             LIMIT ?`,
+          )
+          .all(userId, entryDismissalCursor.updated_at, entryDismissalCursor.updated_at, entryDismissalCursor.key, BATCH_SIZE)
+      : fastify.db
+          .prepare<[string, string, number], SyncEntryDismissal>(
+            `SELECT uuid, deleted, updated_at
+             FROM sync_entry_dismissals
+             WHERE user_id = ? AND updated_at > ?
+             ORDER BY updated_at ASC, uuid ASC
+             LIMIT ?`,
+          )
+          .all(userId, cursor, BATCH_SIZE);
+
     fastify.db
       .prepare<[string, string, string]>(
         "UPDATE devices SET last_sync_at = ? WHERE id = ? AND user_id = ?",
@@ -919,6 +963,7 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
     const hitLimitSss = tagStickySubprojectScopes.length >= BATCH_SIZE;
     const hitLimitMediaLinks = mediaLinks.length >= BATCH_SIZE;
     const hitLimitReminders = reminders.length >= BATCH_SIZE;
+    const hitLimitEntryDismissals = entryDismissals.length >= BATCH_SIZE;
 
     let newCursor = now;
     if (hitLimitTimeTypes) {
@@ -975,6 +1020,12 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
           key: reminders[reminders.length - 1]!.uuid,
         }
       : undefined;
+    const nextEntryDismissalCursor = hitLimitEntryDismissals && entryDismissals.length > 0
+      ? {
+          updated_at: entryDismissals[entryDismissals.length - 1]!.updated_at,
+          key: entryDismissals[entryDismissals.length - 1]!.uuid,
+        }
+      : undefined;
 
     const response: PullResponse = {
       entries,
@@ -990,6 +1041,7 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
       tag_sticky_subproject_scopes: tagStickySubprojectScopes,
       media_links: mediaLinks,
       reminders,
+      entry_dismissals: entryDismissals,
       cursor: newCursor,
       has_more:
         hitLimitTimeTypes ||
@@ -999,7 +1051,8 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
         hitLimitSpa ||
         hitLimitSss ||
         hitLimitMediaLinks ||
-        hitLimitReminders,
+        hitLimitReminders ||
+        hitLimitEntryDismissals,
       ...(nextIconCursor ? { icon_cursor: nextIconCursor } : {}),
       ...(nextSettingCursor ? { setting_cursor: nextSettingCursor } : {}),
       ...(nextTseCursor ? { tag_sticky_exclusion_cursor: nextTseCursor } : {}),
@@ -1007,6 +1060,7 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
       ...(nextSssCursor ? { tag_sticky_subproject_scope_cursor: nextSssCursor } : {}),
       ...(nextMediaLinkCursor ? { media_link_cursor: nextMediaLinkCursor } : {}),
       ...(nextReminderCursor ? { reminder_cursor: nextReminderCursor } : {}),
+      ...(nextEntryDismissalCursor ? { entry_dismissal_cursor: nextEntryDismissalCursor } : {}),
     };
     return reply.send(response);
   });
@@ -1050,6 +1104,7 @@ export function wipeUserSyncRows(db: Database.Database, userId: string): void {
     "sync_tag_sticky_subproject_scopes",
     "sync_media_links",
     "sync_reminders",
+    "sync_entry_dismissals",
   ];
   const tx = db.transaction(() => {
     for (const t of tables) {

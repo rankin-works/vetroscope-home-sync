@@ -183,6 +183,14 @@ export interface SyncReminder {
   updated_at: string;
 }
 
+/** Tombstone for a dismissed tracking entry (Dispute time block).
+ *  uuid is the entries.uuid. deleted=1 means the dismissal was undone. */
+export interface SyncEntryDismissal {
+  uuid: string;
+  deleted: number;
+  updated_at: string;
+}
+
 export interface SyncGoal {
   uuid: string;
   type: string;
@@ -268,6 +276,8 @@ export interface PushPayload {
   // this collection — local reminders still fire, they just don't
   // cross devices via that server.
   reminders?: SyncReminder[];
+  // Dispute-time-block tombstones. Added in 012.
+  entry_dismissals?: SyncEntryDismissal[];
 }
 
 // Compound cursor for tables where rows commonly share an `updated_at`
@@ -310,6 +320,8 @@ export interface PullPayload {
   // create several reminders in quick succession, clustering rows
   // at the same `now`. Compound cursor on (updated_at, uuid).
   reminder_cursor?: CompoundCursor | null;
+  // Dispute-time-block tombstones. Added in 012.
+  entry_dismissal_cursor?: CompoundCursor | null;
 }
 
 export interface PullResponse {
@@ -335,6 +347,8 @@ export interface PullResponse {
   // Custom reminders. Empty when the server predates 008 or when the
   // user has no reminders. Added in 008.
   reminders?: SyncReminder[];
+  // Dispute-time-block tombstones. Added in 012.
+  entry_dismissals?: SyncEntryDismissal[];
   cursor: string;
   has_more?: boolean;
   // Set by v0.1.0-beta.4+ servers when icons / settings were paginated.
@@ -352,4 +366,6 @@ export interface PullResponse {
   media_link_cursor?: CompoundCursor;
   // Added in 008 alongside the sync_reminders table.
   reminder_cursor?: CompoundCursor;
+  // Added in 012 alongside the sync_entry_dismissals table.
+  entry_dismissal_cursor?: CompoundCursor;
 }
