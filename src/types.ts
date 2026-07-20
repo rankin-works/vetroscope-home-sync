@@ -166,16 +166,18 @@ export interface SyncReminder {
   uuid: string;
   title: string; // encrypted client-side
   body: string | null; // encrypted client-side when present
-  kind: string; // cleartext: 'once' | 'repeat'
+  kind: string; // cleartext: 'once' | 'repeat' | 'interval' | 'tag'
   fire_at: string | null;
   weekdays: string | null;
   time_of_day: string | null;
+  end_time_of_day?: string | null;
   start_date: string | null;
   end_date: string | null;
   tag_uuid?: string | null;
   threshold_seconds?: number | null;
   period?: string | null;
   icon_data_url?: string | null; // encrypted client-side
+  interval_seconds?: number | null;
   enabled: number;
   deleted: number;
   /** ISO timestamp set by the client when the reminder fires.

@@ -397,12 +397,14 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
         string | null, // fire_at
         string | null, // weekdays
         string | null, // time_of_day
+        string | null, // end_time_of_day
         string | null, // start_date
         string | null, // end_date
         string | null, // tag_uuid
         number | null, // threshold_seconds
         string | null, // period
         string | null, // icon_data_url
+        number | null, // interval_seconds
         number, // enabled
         number, // deleted
         string | null, // last_fired_at
@@ -411,10 +413,11 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
     >(
       `INSERT INTO sync_reminders (
          uuid, user_id, title, body, kind, fire_at, weekdays, time_of_day,
-         start_date, end_date, tag_uuid, threshold_seconds, period, icon_data_url,
-         enabled, deleted, last_fired_at, updated_at
+         end_time_of_day, start_date, end_date, tag_uuid, threshold_seconds,
+         period, icon_data_url, interval_seconds, enabled, deleted,
+         last_fired_at, updated_at
        )
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(uuid) DO UPDATE SET
          title = excluded.title,
          body = excluded.body,
@@ -422,12 +425,14 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
          fire_at = excluded.fire_at,
          weekdays = excluded.weekdays,
          time_of_day = excluded.time_of_day,
+         end_time_of_day = excluded.end_time_of_day,
          start_date = excluded.start_date,
          end_date = excluded.end_date,
          tag_uuid = excluded.tag_uuid,
          threshold_seconds = excluded.threshold_seconds,
          period = excluded.period,
          icon_data_url = excluded.icon_data_url,
+         interval_seconds = excluded.interval_seconds,
          enabled = excluded.enabled,
          deleted = excluded.deleted,
          last_fired_at = excluded.last_fired_at,
@@ -651,12 +656,14 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
           r.fire_at ?? null,
           r.weekdays ?? null,
           r.time_of_day ?? null,
+          r.end_time_of_day ?? null,
           r.start_date ?? null,
           r.end_date ?? null,
           r.tag_uuid ?? null,
           r.threshold_seconds ?? null,
           r.period ?? null,
           r.icon_data_url ?? null,
+          r.interval_seconds ?? null,
           r.enabled,
           r.deleted,
           r.last_fired_at ?? null,
@@ -986,8 +993,9 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
       ? fastify.db
           .prepare<[string, string, string, string, number], SyncReminder>(
             `SELECT uuid, title, body, kind, fire_at, weekdays, time_of_day,
-                    start_date, end_date, tag_uuid, threshold_seconds, period, icon_data_url,
-                    enabled, deleted, last_fired_at, updated_at
+                    end_time_of_day, start_date, end_date, tag_uuid, threshold_seconds,
+                    period, icon_data_url, interval_seconds, enabled, deleted,
+                    last_fired_at, updated_at
              FROM sync_reminders
              WHERE user_id = ?
                AND (updated_at > ? OR (updated_at = ? AND uuid > ?))
@@ -1004,8 +1012,9 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
       : fastify.db
           .prepare<[string, string, number], SyncReminder>(
             `SELECT uuid, title, body, kind, fire_at, weekdays, time_of_day,
-                    start_date, end_date, tag_uuid, threshold_seconds, period, icon_data_url,
-                    enabled, deleted, last_fired_at, updated_at
+                    end_time_of_day, start_date, end_date, tag_uuid, threshold_seconds,
+                    period, icon_data_url, interval_seconds, enabled, deleted,
+                    last_fired_at, updated_at
              FROM sync_reminders
              WHERE user_id = ? AND updated_at > ?
              ORDER BY updated_at ASC, uuid ASC
