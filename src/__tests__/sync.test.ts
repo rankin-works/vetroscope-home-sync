@@ -651,6 +651,51 @@ describe("/sync", () => {
     expect(rows[0]!.sub_project).toBe("enc-Channel — Some Video Title");
   });
 
+  it("/sync/reminder-claim is won by the first device and lost by the second", async () => {
+    const admin = await bootstrapAdmin(h);
+    const key = "reminder-uuid:repeat:2026-07-20";
+    const first = await h.app.inject({
+      method: "POST",
+      url: "/sync/reminder-claim",
+      headers: { authorization: `Bearer ${admin.accessToken}` },
+      payload: { occurrence_key: key },
+    });
+    expect(first.statusCode).toBe(200);
+    expect(first.json()).toEqual({ claimed: true });
+
+    // Same user, different device — must lose the claim.
+    const secondLogin = await h.app.inject({
+      method: "POST",
+      url: "/auth/login",
+      payload: {
+        email: "admin@test.lan",
+        password: "hunter2hunter2",
+        device_name: "Second Device",
+        platform: "darwin",
+      },
+    });
+    expect(secondLogin.statusCode).toBe(200);
+    const second = secondLogin.json() as { accessToken: string };
+
+    const lost = await h.app.inject({
+      method: "POST",
+      url: "/sync/reminder-claim",
+      headers: { authorization: `Bearer ${second.accessToken}` },
+      payload: { occurrence_key: key },
+    });
+    expect(lost.statusCode).toBe(200);
+    expect(lost.json()).toEqual({ claimed: false });
+
+    // Winner re-claims → still won (idempotent).
+    const again = await h.app.inject({
+      method: "POST",
+      url: "/sync/reminder-claim",
+      headers: { authorization: `Bearer ${admin.accessToken}` },
+      payload: { occurrence_key: key },
+    });
+    expect(again.json()).toEqual({ claimed: true });
+  });
+
   it("reminder tag fields and reminder events round-trip through push + pull", async () => {
     const admin = await bootstrapAdmin(h);
     const reminder = {

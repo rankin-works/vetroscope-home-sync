@@ -1273,6 +1273,40 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
       .all(auth.sub);
     return reply.send({ counts });
   });
+
+  // Atomic mutex for one reminder occurrence — winner shows the OS
+  // notification; losers ack locally without toasting.
+  fastify.post<{ Body: { occurrence_key?: string } }>(
+    "/sync/reminder-claim",
+    async (request, reply) => {
+      const auth = request.authUser as JWTPayload;
+      const occurrenceKey =
+        typeof request.body?.occurrence_key === "string"
+          ? request.body.occurrence_key.trim()
+          : "";
+      if (!occurrenceKey || occurrenceKey.length > 256) {
+        return reply.status(400).send({ error: "occurrence_key required" });
+      }
+      const now = new Date().toISOString();
+      fastify.db
+        .prepare(
+          `INSERT INTO sync_reminder_claims (user_id, occurrence_key, device_id, claimed_at)
+           VALUES (?, ?, ?, ?)
+           ON CONFLICT(user_id, occurrence_key) DO NOTHING`,
+        )
+        .run(auth.sub, occurrenceKey, auth.device_id, now);
+      const row = fastify.db
+        .prepare<
+          [string, string],
+          { device_id: string }
+        >(
+          `SELECT device_id FROM sync_reminder_claims
+            WHERE user_id = ? AND occurrence_key = ?`,
+        )
+        .get(auth.sub, occurrenceKey);
+      return reply.send({ claimed: row?.device_id === auth.device_id });
+    },
+  );
 };
 
 export function wipeUserSyncRows(db: Database.Database, userId: string): void {
@@ -1291,6 +1325,7 @@ export function wipeUserSyncRows(db: Database.Database, userId: string): void {
     "sync_media_links",
     "sync_reminders",
     "sync_reminder_events",
+    "sync_reminder_claims",
     "sync_entry_dismissals",
   ];
   const tx = db.transaction(() => {
