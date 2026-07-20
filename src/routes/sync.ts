@@ -35,6 +35,7 @@ import type {
   SyncTagStickySubprojectScope,
   SyncMediaLink,
   SyncReminder,
+  SyncReminderEvent,
   SyncEntryDismissal,
 } from "../types.js";
 import { compareSemver } from "../lib/semver.js";
@@ -55,7 +56,12 @@ const SETTING_LIMIT = 100;
 // server-side schema stable and the payload bounded. Mirrors the client
 // allowlist (electron/settings.ts) and the cloud API — a key missing here is
 // silently rejected on push even when the client sends it.
-const SYNCED_SETTING_KEYS = new Set(["ignored_apps", "ignored_projects", "ignored_breakdown_patterns", "ignored_sub_projects"]);
+const SYNCED_SETTING_KEYS = new Set([
+  "ignored_apps",
+  "ignored_projects",
+  "ignored_breakdown_patterns",
+  "ignored_sub_projects",
+]);
 
 export const syncRoutes: FastifyPluginAsync = async (fastify) => {
   fastify.addHook("preHandler", fastify.authenticate);
@@ -79,9 +85,10 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
     const auth = request.authUser as JWTPayload | undefined;
     if (!auth) return undefined;
     const row = fastify.db
-      .prepare<[string, string], { app_version: string | null }>(
-        "SELECT app_version FROM devices WHERE id = ? AND user_id = ?",
-      )
+      .prepare<
+        [string, string],
+        { app_version: string | null }
+      >("SELECT app_version FROM devices WHERE id = ? AND user_id = ?")
       .get(auth.device_id, auth.sub);
     const appVersion = row?.app_version ?? null;
     if (appVersion === null) return undefined;
@@ -237,17 +244,7 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
     );
 
     const upsertAchievement = stmts.prepare<
-      [
-        string,
-        string,
-        string,
-        string,
-        string,
-        string,
-        number,
-        number,
-        string,
-      ]
+      [string, string, string, string, string, string, number, number, string]
     >(
       `INSERT INTO sync_goal_achievements (uuid, user_id, goal_uuid, goal_snapshot, date, achieved_at, current_seconds, deleted, updated_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -309,15 +306,7 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
     // the other sync_* upserts — uuid is the natural key, updated_at
     // gates conflicts. Added in 005.
     const upsertTagStickyExclusion = stmts.prepare<
-      [
-        string,
-        string,
-        string | null,
-        string,
-        string | null,
-        number,
-        string,
-      ]
+      [string, string, string | null, string, string | null, number, string]
     >(
       `INSERT INTO sync_tag_sticky_exclusions (uuid, user_id, tag_uuid, app_name, project, deleted, updated_at)
        VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -332,14 +321,7 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
 
     // Per-app allowlist rows for sticky_projects auto-tagging (011).
     const upsertTagStickyProjectApp = stmts.prepare<
-      [
-        string,
-        string,
-        string | null,
-        string,
-        number,
-        string,
-      ]
+      [string, string, string | null, string, number, string]
     >(
       `INSERT INTO sync_tag_sticky_project_apps (uuid, user_id, tag_uuid, app_name, deleted, updated_at)
        VALUES (?, ?, ?, ?, ?, ?)
@@ -353,15 +335,7 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
 
     // Per-breakdown allowlist rows for sticky_subprojects auto-tagging (011).
     const upsertTagStickySubprojectScope = stmts.prepare<
-      [
-        string,
-        string,
-        string | null,
-        string,
-        string,
-        number,
-        string,
-      ]
+      [string, string, string | null, string, string, number, string]
     >(
       `INSERT INTO sync_tag_sticky_subproject_scopes (uuid, user_id, tag_uuid, app_name, project, deleted, updated_at)
        VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -415,27 +389,32 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
     // without decrypting. LWW on updated_at like every other table.
     const upsertReminder = stmts.prepare<
       [
-        string,        // uuid
-        string,        // user_id
-        string,        // title (encrypted)
+        string, // uuid
+        string, // user_id
+        string, // title (encrypted)
         string | null, // body (encrypted or null)
-        string,        // kind
+        string, // kind
         string | null, // fire_at
         string | null, // weekdays
         string | null, // time_of_day
         string | null, // start_date
         string | null, // end_date
-        number,        // enabled
-        number,        // deleted
+        string | null, // tag_uuid
+        number | null, // threshold_seconds
+        string | null, // period
+        string | null, // icon_data_url
+        number, // enabled
+        number, // deleted
         string | null, // last_fired_at
-        string,        // updated_at
+        string, // updated_at
       ]
     >(
       `INSERT INTO sync_reminders (
          uuid, user_id, title, body, kind, fire_at, weekdays, time_of_day,
-         start_date, end_date, enabled, deleted, last_fired_at, updated_at
+         start_date, end_date, tag_uuid, threshold_seconds, period, icon_data_url,
+         enabled, deleted, last_fired_at, updated_at
        )
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(uuid) DO UPDATE SET
          title = excluded.title,
          body = excluded.body,
@@ -445,11 +424,50 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
          time_of_day = excluded.time_of_day,
          start_date = excluded.start_date,
          end_date = excluded.end_date,
+         tag_uuid = excluded.tag_uuid,
+         threshold_seconds = excluded.threshold_seconds,
+         period = excluded.period,
+         icon_data_url = excluded.icon_data_url,
          enabled = excluded.enabled,
          deleted = excluded.deleted,
          last_fired_at = excluded.last_fired_at,
          updated_at = excluded.updated_at
        WHERE excluded.updated_at > sync_reminders.updated_at`,
+    );
+
+    // Reminder notification history (014). Title, body, and icon data are
+    // encrypted client-side; state timestamps converge with LWW semantics.
+    const upsertReminderEvent = stmts.prepare<
+      [
+        string,
+        string,
+        string,
+        string,
+        string | null,
+        string | null,
+        string,
+        string | null,
+        string | null,
+        number,
+        string,
+      ]
+    >(
+      `INSERT INTO sync_reminder_events (
+         uuid, user_id, reminder_uuid, title, body, icon_data_url, fired_at,
+         read_at, dismissed_at, deleted, updated_at
+       )
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(uuid) DO UPDATE SET
+         reminder_uuid = excluded.reminder_uuid,
+         title = excluded.title,
+         body = excluded.body,
+         icon_data_url = excluded.icon_data_url,
+         fired_at = excluded.fired_at,
+         read_at = excluded.read_at,
+         dismissed_at = excluded.dismissed_at,
+         deleted = excluded.deleted,
+         updated_at = excluded.updated_at
+       WHERE excluded.updated_at > sync_reminder_events.updated_at`,
     );
 
     const upsertEntryDismissal = stmts.prepare<
@@ -567,7 +585,10 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
           o.updated_at || now,
         );
       }
-      for (const tse of (body.tag_sticky_exclusions ?? []).slice(0, BATCH_SIZE)) {
+      for (const tse of (body.tag_sticky_exclusions ?? []).slice(
+        0,
+        BATCH_SIZE,
+      )) {
         upsertTagStickyExclusion.run(
           tse.uuid,
           userId,
@@ -578,7 +599,10 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
           tse.updated_at || now,
         );
       }
-      for (const spa of (body.tag_sticky_project_apps ?? []).slice(0, BATCH_SIZE)) {
+      for (const spa of (body.tag_sticky_project_apps ?? []).slice(
+        0,
+        BATCH_SIZE,
+      )) {
         upsertTagStickyProjectApp.run(
           spa.uuid,
           userId,
@@ -588,7 +612,10 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
           spa.updated_at || now,
         );
       }
-      for (const sss of (body.tag_sticky_subproject_scopes ?? []).slice(0, BATCH_SIZE)) {
+      for (const sss of (body.tag_sticky_subproject_scopes ?? []).slice(
+        0,
+        BATCH_SIZE,
+      )) {
         upsertTagStickySubprojectScope.run(
           sss.uuid,
           userId,
@@ -626,10 +653,29 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
           r.time_of_day ?? null,
           r.start_date ?? null,
           r.end_date ?? null,
+          r.tag_uuid ?? null,
+          r.threshold_seconds ?? null,
+          r.period ?? null,
+          r.icon_data_url ?? null,
           r.enabled,
           r.deleted,
           r.last_fired_at ?? null,
           r.updated_at || now,
+        );
+      }
+      for (const event of (body.reminder_events ?? []).slice(0, BATCH_SIZE)) {
+        upsertReminderEvent.run(
+          event.uuid,
+          userId,
+          event.reminder_uuid,
+          event.title,
+          event.body ?? null,
+          event.icon_data_url ?? null,
+          event.fired_at,
+          event.read_at ?? null,
+          event.dismissed_at ?? null,
+          event.deleted,
+          event.updated_at || now,
         );
       }
       for (const d of (body.entry_dismissals ?? []).slice(0, BATCH_SIZE)) {
@@ -736,7 +782,12 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
              ORDER BY updated_at ASC, name_hash ASC
              LIMIT ${ICON_LIMIT}`,
           )
-          .all(userId, iconCursor.updated_at, iconCursor.updated_at, iconCursor.key)
+          .all(
+            userId,
+            iconCursor.updated_at,
+            iconCursor.updated_at,
+            iconCursor.key,
+          )
       : fastify.db
           .prepare<[string, string], SyncIcon>(
             `SELECT name_hash, app_name, platform, data_url, dominant_color, updated_at
@@ -776,7 +827,12 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
              ORDER BY updated_at ASC, key ASC
              LIMIT ${SETTING_LIMIT}`,
           )
-          .all(userId, settingCursor.updated_at, settingCursor.updated_at, settingCursor.key)
+          .all(
+            userId,
+            settingCursor.updated_at,
+            settingCursor.updated_at,
+            settingCursor.key,
+          )
       : fastify.db
           .prepare<[string, string], SyncSetting>(
             `SELECT key, value, updated_at
@@ -794,7 +850,10 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
     const tseCursor = body.tag_sticky_exclusion_cursor;
     const tagStickyExclusions = tseCursor
       ? fastify.db
-          .prepare<[string, string, string, string, number], SyncTagStickyExclusion>(
+          .prepare<
+            [string, string, string, string, number],
+            SyncTagStickyExclusion
+          >(
             `SELECT uuid, tag_uuid, app_name, project, deleted, updated_at
              FROM sync_tag_sticky_exclusions
              WHERE user_id = ?
@@ -802,7 +861,13 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
              ORDER BY updated_at ASC, uuid ASC
              LIMIT ?`,
           )
-          .all(userId, tseCursor.updated_at, tseCursor.updated_at, tseCursor.key, BATCH_SIZE)
+          .all(
+            userId,
+            tseCursor.updated_at,
+            tseCursor.updated_at,
+            tseCursor.key,
+            BATCH_SIZE,
+          )
       : fastify.db
           .prepare<[string, string, number], SyncTagStickyExclusion>(
             `SELECT uuid, tag_uuid, app_name, project, deleted, updated_at
@@ -818,7 +883,10 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
     const spaCursor = body.tag_sticky_project_app_cursor;
     const tagStickyProjectApps = spaCursor
       ? fastify.db
-          .prepare<[string, string, string, string, number], SyncTagStickyProjectApp>(
+          .prepare<
+            [string, string, string, string, number],
+            SyncTagStickyProjectApp
+          >(
             `SELECT uuid, tag_uuid, app_name, deleted, updated_at
              FROM sync_tag_sticky_project_apps
              WHERE user_id = ?
@@ -826,7 +894,13 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
              ORDER BY updated_at ASC, uuid ASC
              LIMIT ?`,
           )
-          .all(userId, spaCursor.updated_at, spaCursor.updated_at, spaCursor.key, BATCH_SIZE)
+          .all(
+            userId,
+            spaCursor.updated_at,
+            spaCursor.updated_at,
+            spaCursor.key,
+            BATCH_SIZE,
+          )
       : fastify.db
           .prepare<[string, string, number], SyncTagStickyProjectApp>(
             `SELECT uuid, tag_uuid, app_name, deleted, updated_at
@@ -841,7 +915,10 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
     const sssCursor = body.tag_sticky_subproject_scope_cursor;
     const tagStickySubprojectScopes = sssCursor
       ? fastify.db
-          .prepare<[string, string, string, string, number], SyncTagStickySubprojectScope>(
+          .prepare<
+            [string, string, string, string, number],
+            SyncTagStickySubprojectScope
+          >(
             `SELECT uuid, tag_uuid, app_name, project, deleted, updated_at
              FROM sync_tag_sticky_subproject_scopes
              WHERE user_id = ?
@@ -849,7 +926,13 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
              ORDER BY updated_at ASC, uuid ASC
              LIMIT ?`,
           )
-          .all(userId, sssCursor.updated_at, sssCursor.updated_at, sssCursor.key, BATCH_SIZE)
+          .all(
+            userId,
+            sssCursor.updated_at,
+            sssCursor.updated_at,
+            sssCursor.key,
+            BATCH_SIZE,
+          )
       : fastify.db
           .prepare<[string, string, number], SyncTagStickySubprojectScope>(
             `SELECT uuid, tag_uuid, app_name, project, deleted, updated_at
@@ -876,7 +959,13 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
              ORDER BY updated_at ASC, uuid ASC
              LIMIT ?`,
           )
-          .all(userId, mediaLinkCursor.updated_at, mediaLinkCursor.updated_at, mediaLinkCursor.key, BATCH_SIZE)
+          .all(
+            userId,
+            mediaLinkCursor.updated_at,
+            mediaLinkCursor.updated_at,
+            mediaLinkCursor.key,
+            BATCH_SIZE,
+          )
       : fastify.db
           .prepare<[string, string, number], SyncMediaLink>(
             `SELECT uuid, app_name, project, sub_project, url, kind, first_seen, last_seen, deleted, updated_at
@@ -897,19 +986,59 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
       ? fastify.db
           .prepare<[string, string, string, string, number], SyncReminder>(
             `SELECT uuid, title, body, kind, fire_at, weekdays, time_of_day,
-                    start_date, end_date, enabled, deleted, last_fired_at, updated_at
+                    start_date, end_date, tag_uuid, threshold_seconds, period, icon_data_url,
+                    enabled, deleted, last_fired_at, updated_at
              FROM sync_reminders
              WHERE user_id = ?
                AND (updated_at > ? OR (updated_at = ? AND uuid > ?))
              ORDER BY updated_at ASC, uuid ASC
              LIMIT ?`,
           )
-          .all(userId, reminderCursor.updated_at, reminderCursor.updated_at, reminderCursor.key, BATCH_SIZE)
+          .all(
+            userId,
+            reminderCursor.updated_at,
+            reminderCursor.updated_at,
+            reminderCursor.key,
+            BATCH_SIZE,
+          )
       : fastify.db
           .prepare<[string, string, number], SyncReminder>(
             `SELECT uuid, title, body, kind, fire_at, weekdays, time_of_day,
-                    start_date, end_date, enabled, deleted, last_fired_at, updated_at
+                    start_date, end_date, tag_uuid, threshold_seconds, period, icon_data_url,
+                    enabled, deleted, last_fired_at, updated_at
              FROM sync_reminders
+             WHERE user_id = ? AND updated_at > ?
+             ORDER BY updated_at ASC, uuid ASC
+             LIMIT ?`,
+          )
+          .all(userId, cursor, BATCH_SIZE);
+
+    // Reminder notification history (014). Compound cursor matches
+    // reminders: bulk event inserts commonly share an updated_at timestamp.
+    const reminderEventCursor = body.reminder_event_cursor;
+    const reminderEvents = reminderEventCursor
+      ? fastify.db
+          .prepare<[string, string, string, string, number], SyncReminderEvent>(
+            `SELECT uuid, reminder_uuid, title, body, icon_data_url, fired_at,
+                    read_at, dismissed_at, deleted, updated_at
+             FROM sync_reminder_events
+             WHERE user_id = ?
+               AND (updated_at > ? OR (updated_at = ? AND uuid > ?))
+             ORDER BY updated_at ASC, uuid ASC
+             LIMIT ?`,
+          )
+          .all(
+            userId,
+            reminderEventCursor.updated_at,
+            reminderEventCursor.updated_at,
+            reminderEventCursor.key,
+            BATCH_SIZE,
+          )
+      : fastify.db
+          .prepare<[string, string, number], SyncReminderEvent>(
+            `SELECT uuid, reminder_uuid, title, body, icon_data_url, fired_at,
+                    read_at, dismissed_at, deleted, updated_at
+             FROM sync_reminder_events
              WHERE user_id = ? AND updated_at > ?
              ORDER BY updated_at ASC, uuid ASC
              LIMIT ?`,
@@ -921,7 +1050,10 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
     const entryDismissalCursor = body.entry_dismissal_cursor;
     const entryDismissals = entryDismissalCursor
       ? fastify.db
-          .prepare<[string, string, string, string, number], SyncEntryDismissal>(
+          .prepare<
+            [string, string, string, string, number],
+            SyncEntryDismissal
+          >(
             `SELECT uuid, deleted, updated_at
              FROM sync_entry_dismissals
              WHERE user_id = ?
@@ -929,7 +1061,13 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
              ORDER BY updated_at ASC, uuid ASC
              LIMIT ?`,
           )
-          .all(userId, entryDismissalCursor.updated_at, entryDismissalCursor.updated_at, entryDismissalCursor.key, BATCH_SIZE)
+          .all(
+            userId,
+            entryDismissalCursor.updated_at,
+            entryDismissalCursor.updated_at,
+            entryDismissalCursor.key,
+            BATCH_SIZE,
+          )
       : fastify.db
           .prepare<[string, string, number], SyncEntryDismissal>(
             `SELECT uuid, deleted, updated_at
@@ -941,9 +1079,9 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
           .all(userId, cursor, BATCH_SIZE);
 
     fastify.db
-      .prepare<[string, string, string]>(
-        "UPDATE devices SET last_sync_at = ? WHERE id = ? AND user_id = ?",
-      )
+      .prepare<
+        [string, string, string]
+      >("UPDATE devices SET last_sync_at = ? WHERE id = ? AND user_id = ?")
       .run(now, auth.device_id, userId);
 
     // Time-cursor types: entries, tags, goals, markers, achievements.
@@ -963,13 +1101,17 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
     const hitLimitSss = tagStickySubprojectScopes.length >= BATCH_SIZE;
     const hitLimitMediaLinks = mediaLinks.length >= BATCH_SIZE;
     const hitLimitReminders = reminders.length >= BATCH_SIZE;
+    const hitLimitReminderEvents = reminderEvents.length >= BATCH_SIZE;
     const hitLimitEntryDismissals = entryDismissals.length >= BATCH_SIZE;
 
     let newCursor = now;
     if (hitLimitTimeTypes) {
       const latestPerType = [entries, tags, goals, markers, achievements]
         .filter((arr) => arr.length > 0)
-        .map((arr) => (arr as Array<{ updated_at: string }>)[arr.length - 1]!.updated_at);
+        .map(
+          (arr) =>
+            (arr as Array<{ updated_at: string }>)[arr.length - 1]!.updated_at,
+        );
       if (latestPerType.length > 0) {
         newCursor = latestPerType.sort()[0]!;
       }
@@ -978,54 +1120,75 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
     // Compound cursors — only emitted when the matching table paginated.
     // The client round-trips them on the next pull. Absence means "this
     // type is fully drained at this snapshot."
-    const nextIconCursor = hitLimitIcons && icons.length > 0
-      ? {
-          updated_at: icons[icons.length - 1]!.updated_at,
-          key: icons[icons.length - 1]!.name_hash,
-        }
-      : undefined;
-    const nextSettingCursor = hitLimitSettings && settings.length > 0
-      ? {
-          updated_at: settings[settings.length - 1]!.updated_at,
-          key: settings[settings.length - 1]!.key,
-        }
-      : undefined;
-    const nextTseCursor = hitLimitTse && tagStickyExclusions.length > 0
-      ? {
-          updated_at: tagStickyExclusions[tagStickyExclusions.length - 1]!.updated_at,
-          key: tagStickyExclusions[tagStickyExclusions.length - 1]!.uuid,
-        }
-      : undefined;
-    const nextSpaCursor = hitLimitSpa && tagStickyProjectApps.length > 0
-      ? {
-          updated_at: tagStickyProjectApps[tagStickyProjectApps.length - 1]!.updated_at,
-          key: tagStickyProjectApps[tagStickyProjectApps.length - 1]!.uuid,
-        }
-      : undefined;
-    const nextSssCursor = hitLimitSss && tagStickySubprojectScopes.length > 0
-      ? {
-          updated_at: tagStickySubprojectScopes[tagStickySubprojectScopes.length - 1]!.updated_at,
-          key: tagStickySubprojectScopes[tagStickySubprojectScopes.length - 1]!.uuid,
-        }
-      : undefined;
-    const nextMediaLinkCursor = hitLimitMediaLinks && mediaLinks.length > 0
-      ? {
-          updated_at: mediaLinks[mediaLinks.length - 1]!.updated_at,
-          key: mediaLinks[mediaLinks.length - 1]!.uuid,
-        }
-      : undefined;
-    const nextReminderCursor = hitLimitReminders && reminders.length > 0
-      ? {
-          updated_at: reminders[reminders.length - 1]!.updated_at,
-          key: reminders[reminders.length - 1]!.uuid,
-        }
-      : undefined;
-    const nextEntryDismissalCursor = hitLimitEntryDismissals && entryDismissals.length > 0
-      ? {
-          updated_at: entryDismissals[entryDismissals.length - 1]!.updated_at,
-          key: entryDismissals[entryDismissals.length - 1]!.uuid,
-        }
-      : undefined;
+    const nextIconCursor =
+      hitLimitIcons && icons.length > 0
+        ? {
+            updated_at: icons[icons.length - 1]!.updated_at,
+            key: icons[icons.length - 1]!.name_hash,
+          }
+        : undefined;
+    const nextSettingCursor =
+      hitLimitSettings && settings.length > 0
+        ? {
+            updated_at: settings[settings.length - 1]!.updated_at,
+            key: settings[settings.length - 1]!.key,
+          }
+        : undefined;
+    const nextTseCursor =
+      hitLimitTse && tagStickyExclusions.length > 0
+        ? {
+            updated_at:
+              tagStickyExclusions[tagStickyExclusions.length - 1]!.updated_at,
+            key: tagStickyExclusions[tagStickyExclusions.length - 1]!.uuid,
+          }
+        : undefined;
+    const nextSpaCursor =
+      hitLimitSpa && tagStickyProjectApps.length > 0
+        ? {
+            updated_at:
+              tagStickyProjectApps[tagStickyProjectApps.length - 1]!.updated_at,
+            key: tagStickyProjectApps[tagStickyProjectApps.length - 1]!.uuid,
+          }
+        : undefined;
+    const nextSssCursor =
+      hitLimitSss && tagStickySubprojectScopes.length > 0
+        ? {
+            updated_at:
+              tagStickySubprojectScopes[tagStickySubprojectScopes.length - 1]!
+                .updated_at,
+            key: tagStickySubprojectScopes[
+              tagStickySubprojectScopes.length - 1
+            ]!.uuid,
+          }
+        : undefined;
+    const nextMediaLinkCursor =
+      hitLimitMediaLinks && mediaLinks.length > 0
+        ? {
+            updated_at: mediaLinks[mediaLinks.length - 1]!.updated_at,
+            key: mediaLinks[mediaLinks.length - 1]!.uuid,
+          }
+        : undefined;
+    const nextReminderCursor =
+      hitLimitReminders && reminders.length > 0
+        ? {
+            updated_at: reminders[reminders.length - 1]!.updated_at,
+            key: reminders[reminders.length - 1]!.uuid,
+          }
+        : undefined;
+    const nextReminderEventCursor =
+      hitLimitReminderEvents && reminderEvents.length > 0
+        ? {
+            updated_at: reminderEvents[reminderEvents.length - 1]!.updated_at,
+            key: reminderEvents[reminderEvents.length - 1]!.uuid,
+          }
+        : undefined;
+    const nextEntryDismissalCursor =
+      hitLimitEntryDismissals && entryDismissals.length > 0
+        ? {
+            updated_at: entryDismissals[entryDismissals.length - 1]!.updated_at,
+            key: entryDismissals[entryDismissals.length - 1]!.uuid,
+          }
+        : undefined;
 
     const response: PullResponse = {
       entries,
@@ -1041,6 +1204,7 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
       tag_sticky_subproject_scopes: tagStickySubprojectScopes,
       media_links: mediaLinks,
       reminders,
+      reminder_events: reminderEvents,
       entry_dismissals: entryDismissals,
       cursor: newCursor,
       has_more:
@@ -1052,15 +1216,27 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
         hitLimitSss ||
         hitLimitMediaLinks ||
         hitLimitReminders ||
+        hitLimitReminderEvents ||
         hitLimitEntryDismissals,
       ...(nextIconCursor ? { icon_cursor: nextIconCursor } : {}),
       ...(nextSettingCursor ? { setting_cursor: nextSettingCursor } : {}),
       ...(nextTseCursor ? { tag_sticky_exclusion_cursor: nextTseCursor } : {}),
-      ...(nextSpaCursor ? { tag_sticky_project_app_cursor: nextSpaCursor } : {}),
-      ...(nextSssCursor ? { tag_sticky_subproject_scope_cursor: nextSssCursor } : {}),
-      ...(nextMediaLinkCursor ? { media_link_cursor: nextMediaLinkCursor } : {}),
+      ...(nextSpaCursor
+        ? { tag_sticky_project_app_cursor: nextSpaCursor }
+        : {}),
+      ...(nextSssCursor
+        ? { tag_sticky_subproject_scope_cursor: nextSssCursor }
+        : {}),
+      ...(nextMediaLinkCursor
+        ? { media_link_cursor: nextMediaLinkCursor }
+        : {}),
       ...(nextReminderCursor ? { reminder_cursor: nextReminderCursor } : {}),
-      ...(nextEntryDismissalCursor ? { entry_dismissal_cursor: nextEntryDismissalCursor } : {}),
+      ...(nextReminderEventCursor
+        ? { reminder_event_cursor: nextReminderEventCursor }
+        : {}),
+      ...(nextEntryDismissalCursor
+        ? { entry_dismissal_cursor: nextEntryDismissalCursor }
+        : {}),
     };
     return reply.send(response);
   });
@@ -1070,9 +1246,9 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
     const userId = auth.sub;
     wipeUserSyncRows(fastify.db, userId);
     fastify.db
-      .prepare<[string]>(
-        "UPDATE devices SET last_sync_at = NULL WHERE user_id = ?",
-      )
+      .prepare<
+        [string]
+      >("UPDATE devices SET last_sync_at = NULL WHERE user_id = ?")
       .run(userId);
     request.log.info({ userId }, "sync reset");
     return reply.send({ ok: true });
@@ -1081,9 +1257,10 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
   fastify.post("/sync/count", async (request, reply) => {
     const auth = request.authUser as JWTPayload;
     const counts = fastify.db
-      .prepare<[string], { device_id: string; count: number }>(
-        "SELECT device_id, COUNT(*) AS count FROM sync_entries WHERE user_id = ? GROUP BY device_id",
-      )
+      .prepare<
+        [string],
+        { device_id: string; count: number }
+      >("SELECT device_id, COUNT(*) AS count FROM sync_entries WHERE user_id = ? GROUP BY device_id")
       .all(auth.sub);
     return reply.send({ counts });
   });
@@ -1104,6 +1281,7 @@ export function wipeUserSyncRows(db: Database.Database, userId: string): void {
     "sync_tag_sticky_subproject_scopes",
     "sync_media_links",
     "sync_reminders",
+    "sync_reminder_events",
     "sync_entry_dismissals",
   ];
   const tx = db.transaction(() => {

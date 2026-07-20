@@ -119,7 +119,7 @@ export interface SyncTag {
 export interface SyncTagStickyExclusion {
   uuid: string;
   tag_uuid: string | null;
-  app_name: string;     // encrypted client-side
+  app_name: string; // encrypted client-side
   project: string | null; // encrypted client-side, null when scope has no breakdown
   deleted: number;
   updated_at: string;
@@ -129,7 +129,7 @@ export interface SyncTagStickyExclusion {
 export interface SyncTagStickyProjectApp {
   uuid: string;
   tag_uuid: string | null;
-  app_name: string;     // encrypted client-side
+  app_name: string; // encrypted client-side
   deleted: number;
   updated_at: string;
 }
@@ -138,8 +138,8 @@ export interface SyncTagStickyProjectApp {
 export interface SyncTagStickySubprojectScope {
   uuid: string;
   tag_uuid: string | null;
-  app_name: string;     // encrypted client-side
-  project: string;      // encrypted client-side
+  app_name: string; // encrypted client-side
+  project: string; // encrypted client-side
   deleted: number;
   updated_at: string;
 }
@@ -151,11 +151,11 @@ export interface SyncTagStickySubprojectScope {
 // return an empty (or undefined) array on pull.
 export interface SyncMediaLink {
   uuid: string;
-  app_name: string;     // encrypted client-side
-  project: string;      // encrypted client-side
-  sub_project: string;  // encrypted client-side ('' encrypted as the sentinel)
-  url: string;          // encrypted client-side
-  kind: string;         // cleartext: 'spotify_track' | 'youtube_watch'
+  app_name: string; // encrypted client-side
+  project: string; // encrypted client-side
+  sub_project: string; // encrypted client-side ('' encrypted as the sentinel)
+  url: string; // encrypted client-side
+  kind: string; // cleartext: 'spotify_track' | 'youtube_watch'
   first_seen: string;
   last_seen: string;
   deleted: number;
@@ -164,14 +164,18 @@ export interface SyncMediaLink {
 
 export interface SyncReminder {
   uuid: string;
-  title: string;        // encrypted client-side
-  body: string | null;  // encrypted client-side when present
-  kind: string;         // cleartext: 'once' | 'repeat'
+  title: string; // encrypted client-side
+  body: string | null; // encrypted client-side when present
+  kind: string; // cleartext: 'once' | 'repeat'
   fire_at: string | null;
   weekdays: string | null;
   time_of_day: string | null;
   start_date: string | null;
   end_date: string | null;
+  tag_uuid?: string | null;
+  threshold_seconds?: number | null;
+  period?: string | null;
+  icon_data_url?: string | null; // encrypted client-side
   enabled: number;
   deleted: number;
   /** ISO timestamp set by the client when the reminder fires.
@@ -180,6 +184,20 @@ export interface SyncReminder {
    *  online later. Optional on the wire — pre-010 servers and
    *  pre-fix clients omit it. */
   last_fired_at?: string | null;
+  updated_at: string;
+}
+
+/** Notification history for a reminder. Added in 014. */
+export interface SyncReminderEvent {
+  uuid: string;
+  reminder_uuid: string;
+  title: string; // encrypted client-side
+  body: string | null; // encrypted client-side
+  icon_data_url: string | null; // encrypted client-side
+  fired_at: string;
+  read_at: string | null;
+  dismissed_at: string | null;
+  deleted: number;
   updated_at: string;
 }
 
@@ -276,6 +294,8 @@ export interface PushPayload {
   // this collection — local reminders still fire, they just don't
   // cross devices via that server.
   reminders?: SyncReminder[];
+  // Reminder notification history. Added in 014.
+  reminder_events?: SyncReminderEvent[];
   // Dispute-time-block tombstones. Added in 012.
   entry_dismissals?: SyncEntryDismissal[];
 }
@@ -320,6 +340,8 @@ export interface PullPayload {
   // create several reminders in quick succession, clustering rows
   // at the same `now`. Compound cursor on (updated_at, uuid).
   reminder_cursor?: CompoundCursor | null;
+  // Reminder notification history. Compound cursor on (updated_at, uuid).
+  reminder_event_cursor?: CompoundCursor | null;
   // Dispute-time-block tombstones. Added in 012.
   entry_dismissal_cursor?: CompoundCursor | null;
 }
@@ -347,6 +369,8 @@ export interface PullResponse {
   // Custom reminders. Empty when the server predates 008 or when the
   // user has no reminders. Added in 008.
   reminders?: SyncReminder[];
+  // Reminder notification history. Added in 014.
+  reminder_events?: SyncReminderEvent[];
   // Dispute-time-block tombstones. Added in 012.
   entry_dismissals?: SyncEntryDismissal[];
   cursor: string;
@@ -366,6 +390,8 @@ export interface PullResponse {
   media_link_cursor?: CompoundCursor;
   // Added in 008 alongside the sync_reminders table.
   reminder_cursor?: CompoundCursor;
+  // Added in 014 alongside the sync_reminder_events table.
+  reminder_event_cursor?: CompoundCursor;
   // Added in 012 alongside the sync_entry_dismissals table.
   entry_dismissal_cursor?: CompoundCursor;
 }

@@ -123,9 +123,10 @@ describe("/sync", () => {
       },
     });
     const row = h.db
-      .prepare<[string], { name: string; color: string }>(
-        "SELECT name, color FROM sync_tags WHERE uuid = ?",
-      )
+      .prepare<
+        [string],
+        { name: string; color: string }
+      >("SELECT name, color FROM sync_tags WHERE uuid = ?")
       .get("t1");
     expect(row?.name).toBe("newer");
     expect(row?.color).toBe("#fff");
@@ -257,9 +258,7 @@ describe("/sync", () => {
     expect(adminRows.n).toBe(0);
 
     const otherRows = h.db
-      .prepare(
-        "SELECT COUNT(*) AS n FROM sync_entries WHERE user_id != ?",
-      )
+      .prepare("SELECT COUNT(*) AS n FROM sync_entries WHERE user_id != ?")
       .get(admin.userId) as { n: number };
     expect(otherRows.n).toBe(1);
   });
@@ -379,9 +378,10 @@ describe("/sync", () => {
       },
     });
     const row = h.db
-      .prepare<[string], { created_at: string | null; target_seconds: number }>(
-        "SELECT created_at, target_seconds FROM sync_goals WHERE uuid = ?",
-      )
+      .prepare<
+        [string],
+        { created_at: string | null; target_seconds: number }
+      >("SELECT created_at, target_seconds FROM sync_goals WHERE uuid = ?")
       .get("g-fww");
     expect(row?.created_at).toBe("2026-04-20T08:00:00.000Z");
     expect(row?.target_seconds).toBe(7200);
@@ -649,6 +649,59 @@ describe("/sync", () => {
     const rows = pull.json().entries as Array<typeof e>;
     expect(rows).toHaveLength(1);
     expect(rows[0]!.sub_project).toBe("enc-Channel — Some Video Title");
+  });
+
+  it("reminder tag fields and reminder events round-trip through push + pull", async () => {
+    const admin = await bootstrapAdmin(h);
+    const reminder = {
+      uuid: "reminder-tag-1",
+      title: "enc-Tag reminder",
+      body: "enc-Body",
+      kind: "tag",
+      fire_at: null,
+      weekdays: null,
+      time_of_day: null,
+      start_date: null,
+      end_date: null,
+      tag_uuid: "tag-abc",
+      threshold_seconds: 3600,
+      period: "day",
+      icon_data_url: "enc-reminder-icon",
+      enabled: 1,
+      deleted: 0,
+      last_fired_at: null,
+      updated_at: "2026-05-01T08:00:00.000Z",
+    };
+    const event = {
+      uuid: "reminder-event-1",
+      reminder_uuid: reminder.uuid,
+      title: reminder.title,
+      body: reminder.body,
+      icon_data_url: reminder.icon_data_url,
+      fired_at: "2026-05-01T09:00:00.000Z",
+      read_at: null,
+      dismissed_at: null,
+      deleted: 0,
+      updated_at: "2026-05-01T09:00:00.000Z",
+    };
+    const push = await h.app.inject({
+      method: "POST",
+      url: "/sync/push",
+      headers: { authorization: `Bearer ${admin.accessToken}` },
+      payload: { reminders: [reminder], reminder_events: [event] },
+    });
+    expect(push.statusCode).toBe(200);
+
+    const pull = await h.app.inject({
+      method: "POST",
+      url: "/sync/pull",
+      headers: { authorization: `Bearer ${admin.accessToken}` },
+      payload: { cursor: null, device_id: "other-device" },
+    });
+    expect(pull.statusCode).toBe(200);
+    const body = pull.json();
+    expect(body.reminders).toEqual([reminder]);
+    expect(body.reminder_events).toEqual([event]);
   });
 
   it("sync_tag_sticky_exclusions round-trips through push + pull", async () => {
