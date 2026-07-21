@@ -406,6 +406,7 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
         string | null, // icon_data_url
         number | null, // interval_seconds
         string | null, // app_name
+        string | null, // project
         string | null, // goal_uuid
         number | null, // goal_notify_half
         number | null, // goal_notify_complete
@@ -418,11 +419,11 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
       `INSERT INTO sync_reminders (
          uuid, user_id, title, body, kind, fire_at, weekdays, time_of_day,
          end_time_of_day, start_date, end_date, tag_uuid, threshold_seconds,
-         period, icon_data_url, interval_seconds, app_name, goal_uuid,
+         period, icon_data_url, interval_seconds, app_name, project, goal_uuid,
          goal_notify_half, goal_notify_complete, enabled, deleted,
          last_fired_at, updated_at
        )
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(uuid) DO UPDATE SET
          title = excluded.title,
          body = excluded.body,
@@ -439,6 +440,7 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
          icon_data_url = excluded.icon_data_url,
          interval_seconds = excluded.interval_seconds,
          app_name = excluded.app_name,
+         project = excluded.project,
          goal_uuid = excluded.goal_uuid,
          goal_notify_half = excluded.goal_notify_half,
          goal_notify_complete = excluded.goal_notify_complete,
@@ -674,6 +676,7 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
           r.icon_data_url ?? null,
           r.interval_seconds ?? null,
           r.app_name ?? null,
+          r.project ?? null,
           r.goal_uuid ?? null,
           r.goal_notify_half ?? 1,
           r.goal_notify_complete ?? 1,
@@ -1007,7 +1010,7 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
           .prepare<[string, string, string, string, number], SyncReminder>(
             `SELECT uuid, title, body, kind, fire_at, weekdays, time_of_day,
                     end_time_of_day, start_date, end_date, tag_uuid, threshold_seconds,
-                    period, icon_data_url, interval_seconds, app_name, goal_uuid,
+                    period, icon_data_url, interval_seconds, app_name, project, goal_uuid,
                     goal_notify_half, goal_notify_complete, enabled, deleted,
                     last_fired_at, updated_at
              FROM sync_reminders
@@ -1027,7 +1030,7 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
           .prepare<[string, string, number], SyncReminder>(
             `SELECT uuid, title, body, kind, fire_at, weekdays, time_of_day,
                     end_time_of_day, start_date, end_date, tag_uuid, threshold_seconds,
-                    period, icon_data_url, interval_seconds, app_name, goal_uuid,
+                    period, icon_data_url, interval_seconds, app_name, project, goal_uuid,
                     goal_notify_half, goal_notify_complete, enabled, deleted,
                     last_fired_at, updated_at
              FROM sync_reminders

@@ -715,6 +715,7 @@ describe("/sync", () => {
       icon_data_url: "enc-reminder-icon",
       interval_seconds: null,
       app_name: null,
+      project: null,
       goal_uuid: null,
       goal_notify_half: 1,
       goal_notify_complete: 1,

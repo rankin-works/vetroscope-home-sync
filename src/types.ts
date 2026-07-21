@@ -180,6 +180,8 @@ export interface SyncReminder {
   interval_seconds?: number | null;
   /** Encrypted app name for kind='app' | 'presence' (018). */
   app_name?: string | null;
+  /** Encrypted optional breakdown for kind='app' | 'presence' (020). Null = entire app. */
+  project?: string | null;
   /** Cleartext goal uuid for kind='goal' (019). */
   goal_uuid?: string | null;
   goal_notify_half?: number | null;
