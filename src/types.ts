@@ -166,7 +166,7 @@ export interface SyncReminder {
   uuid: string;
   title: string; // encrypted client-side
   body: string | null; // encrypted client-side when present
-  kind: string; // cleartext: 'once' | 'repeat' | 'interval' | 'tag'
+  kind: string; // cleartext: 'once' | 'repeat' | 'interval' | 'tag' | 'app' | 'presence' | 'goal'
   fire_at: string | null;
   weekdays: string | null;
   time_of_day: string | null;
@@ -178,6 +178,12 @@ export interface SyncReminder {
   period?: string | null;
   icon_data_url?: string | null; // encrypted client-side
   interval_seconds?: number | null;
+  /** Encrypted app name for kind='app' | 'presence' (018). */
+  app_name?: string | null;
+  /** Cleartext goal uuid for kind='goal' (019). */
+  goal_uuid?: string | null;
+  goal_notify_half?: number | null;
+  goal_notify_complete?: number | null;
   enabled: number;
   deleted: number;
   /** ISO timestamp set by the client when the reminder fires.
