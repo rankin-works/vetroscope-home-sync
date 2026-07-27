@@ -115,6 +115,8 @@ export async function createUser(
     plan: HOME_PLAN,
     role: input.role,
     encrypted_sync_key: null,
+    onboarding_status: null,
+    onboarding_status_at: null,
     created_at: now,
     updated_at: now,
   };
