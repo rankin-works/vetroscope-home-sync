@@ -9,6 +9,8 @@ export type Plan = "home";
 export type Role = "admin" | "user";
 export type Platform = "darwin" | "win32" | "linux";
 
+export type OnboardingStatus = "completed" | "skipped";
+
 export interface UserRow {
   id: string;
   email: string;
@@ -18,6 +20,9 @@ export interface UserRow {
   plan: Plan;
   role: Role;
   encrypted_sync_key: string | null;
+  /** NULL | 'completed' | 'skipped' — welcome guide disposition. */
+  onboarding_status: OnboardingStatus | null;
+  onboarding_status_at: string | null;
   created_at: string;
   updated_at: string;
 }

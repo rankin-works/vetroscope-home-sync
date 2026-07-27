@@ -42,6 +42,10 @@ export const userRoutes: FastifyPluginAsync = async (fastify) => {
       return reply.status(404).send({ error: "user_not_found" });
     }
     const devices = listDevices(fastify.db, auth.sub);
+    const onboardingStatus =
+      user.onboarding_status === "completed" || user.onboarding_status === "skipped"
+        ? user.onboarding_status
+        : null;
     return reply.send({
       user: {
         id: user.id,
@@ -51,6 +55,8 @@ export const userRoutes: FastifyPluginAsync = async (fastify) => {
         role: user.role,
         has_subscription: false,
         created_at: user.created_at,
+        onboarding_status: onboardingStatus,
+        onboarding_done: onboardingStatus !== null,
       },
       devices: devices.map((d) => ({
         id: d.id,
@@ -60,6 +66,43 @@ export const userRoutes: FastifyPluginAsync = async (fastify) => {
         created_at: d.created_at,
         is_current: d.id === auth.device_id,
       })),
+    });
+  });
+
+  const setOnboardingStatus = (
+    userId: string,
+    status: "completed" | "skipped",
+  ): void => {
+    // Always stamp status_at so complete-after-skip (About → Finish)
+    // records the latest disposition. Idempotent when re-posted.
+    fastify.db
+      .prepare<[string, string]>(
+        `UPDATE users SET
+           onboarding_status = ?,
+           onboarding_status_at = datetime('now'),
+           updated_at = datetime('now')
+         WHERE id = ?`,
+      )
+      .run(status, userId);
+  };
+
+  fastify.post("/user/onboarding/complete", async (request, reply) => {
+    const auth = request.authUser as JWTPayload;
+    setOnboardingStatus(auth.sub, "completed");
+    return reply.send({
+      ok: true,
+      onboarding_status: "completed",
+      onboarding_done: true,
+    });
+  });
+
+  fastify.post("/user/onboarding/skip", async (request, reply) => {
+    const auth = request.authUser as JWTPayload;
+    setOnboardingStatus(auth.sub, "skipped");
+    return reply.send({
+      ok: true,
+      onboarding_status: "skipped",
+      onboarding_done: true,
     });
   });
 

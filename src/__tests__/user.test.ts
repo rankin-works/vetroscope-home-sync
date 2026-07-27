@@ -23,6 +23,48 @@ describe("/user", () => {
     const body = res.json();
     expect(body.user.id).toBe(admin.userId);
     expect(body.devices[0].is_current).toBe(true);
+    expect(body.user.onboarding_status).toBeNull();
+    expect(body.user.onboarding_done).toBe(false);
+  });
+
+  it("onboarding complete + skip update profile disposition", async () => {
+    const admin = await bootstrapAdmin(h);
+
+    const complete = await h.app.inject({
+      method: "POST",
+      url: "/user/onboarding/complete",
+      headers: { authorization: `Bearer ${admin.accessToken}` },
+    });
+    expect(complete.statusCode).toBe(200);
+    expect(complete.json()).toMatchObject({
+      ok: true,
+      onboarding_status: "completed",
+      onboarding_done: true,
+    });
+
+    let profile = await h.app.inject({
+      method: "GET",
+      url: "/user/profile",
+      headers: { authorization: `Bearer ${admin.accessToken}` },
+    });
+    expect(profile.json().user.onboarding_status).toBe("completed");
+    expect(profile.json().user.onboarding_done).toBe(true);
+
+    const skip = await h.app.inject({
+      method: "POST",
+      url: "/user/onboarding/skip",
+      headers: { authorization: `Bearer ${admin.accessToken}` },
+    });
+    expect(skip.statusCode).toBe(200);
+    expect(skip.json().onboarding_status).toBe("skipped");
+
+    profile = await h.app.inject({
+      method: "GET",
+      url: "/user/profile",
+      headers: { authorization: `Bearer ${admin.accessToken}` },
+    });
+    expect(profile.json().user.onboarding_status).toBe("skipped");
+    expect(profile.json().user.onboarding_done).toBe(true);
   });
 
   it("password change invalidates old password and accepts new", async () => {
