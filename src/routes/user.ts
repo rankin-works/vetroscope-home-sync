@@ -11,7 +11,27 @@ import type { FastifyPluginAsync } from "fastify";
 import { generateSalt, hashPassword, verifyPassword } from "../lib/crypto.js";
 import { listDevices } from "../lib/device-service.js";
 import { MIN_PASSWORD_LENGTH } from "../lib/auth-service.js";
+import { encryptSyncDek, decryptSyncDek } from "../lib/secret-crypto.js";
 import type { JWTPayload, UserRow } from "../types.js";
+
+type SyncKeyRow = {
+  encrypted_sync_key: string | null;
+  sync_key_server_wrap: string | null;
+  sync_key_e2ee_wrap: string | null;
+  encryption_mode: string | null;
+};
+
+function normalizeMode(row: SyncKeyRow): "default" | "e2ee" {
+  if (row.encryption_mode === "default" || row.encryption_mode === "e2ee") {
+    return row.encryption_mode;
+  }
+  if (row.encrypted_sync_key || row.sync_key_e2ee_wrap) return "e2ee";
+  return "default";
+}
+
+function e2eeWrapOf(row: SyncKeyRow): string | null {
+  return row.sync_key_e2ee_wrap || row.encrypted_sync_key || null;
+}
 
 interface UpdateProfileBody {
   display_name?: string;
@@ -216,29 +236,229 @@ export const userRoutes: FastifyPluginAsync = async (fastify) => {
           message: "encrypted_sync_key is required.",
         });
       }
-      fastify.db
-        .prepare<[string, string]>(
-          "UPDATE users SET encrypted_sync_key = ?, updated_at = datetime('now') WHERE id = ?",
-        )
-        .run(body.encrypted_sync_key, auth.sub);
+      try {
+        fastify.db
+          .prepare<[string, string, string]>(
+            `UPDATE users SET
+               encrypted_sync_key = ?,
+               sync_key_e2ee_wrap = ?,
+               encryption_mode = 'e2ee',
+               updated_at = datetime('now')
+             WHERE id = ?`,
+          )
+          .run(body.encrypted_sync_key, body.encrypted_sync_key, auth.sub);
+      } catch {
+        fastify.db
+          .prepare<[string, string]>(
+            "UPDATE users SET encrypted_sync_key = ?, updated_at = datetime('now') WHERE id = ?",
+          )
+          .run(body.encrypted_sync_key, auth.sub);
+      }
       return reply.send({ ok: true });
     },
   );
 
   fastify.get("/user/sync-key", async (request, reply) => {
     const auth = request.authUser as JWTPayload;
-    const row = fastify.db
-      .prepare<[string], { encrypted_sync_key: string | null }>(
-        "SELECT encrypted_sync_key FROM users WHERE id = ?",
-      )
-      .get(auth.sub);
+    let row: SyncKeyRow | undefined;
+    try {
+      row = fastify.db
+        .prepare<[string], SyncKeyRow>(
+          `SELECT encrypted_sync_key, sync_key_server_wrap, sync_key_e2ee_wrap, encryption_mode
+           FROM users WHERE id = ?`,
+        )
+        .get(auth.sub);
+    } catch {
+      const legacy = fastify.db
+        .prepare<[string], { encrypted_sync_key: string | null }>(
+          "SELECT encrypted_sync_key FROM users WHERE id = ?",
+        )
+        .get(auth.sub);
+      if (!legacy) {
+        return reply.status(404).send({ error: "user_not_found" });
+      }
+      row = {
+        encrypted_sync_key: legacy.encrypted_sync_key,
+        sync_key_server_wrap: null,
+        sync_key_e2ee_wrap: null,
+        encryption_mode: legacy.encrypted_sync_key ? "e2ee" : "default",
+      };
+    }
     if (row === undefined) {
       return reply.status(404).send({ error: "user_not_found" });
     }
+    const mode = normalizeMode(row);
+    const e2ee = e2eeWrapOf(row);
+    const hasServer = !!row.sync_key_server_wrap;
+    const hasE2ee = !!e2ee;
     return reply.send({
-      encrypted_sync_key: row.encrypted_sync_key,
-      has_key: row.encrypted_sync_key !== null,
+      encrypted_sync_key: e2ee,
+      has_key: hasServer || hasE2ee,
+      mode,
+      has_server_wrap: hasServer,
+      has_e2ee_wrap: hasE2ee,
     });
+  });
+
+  fastify.put<{ Body: { encryption_key?: string } }>(
+    "/user/sync-key/server",
+    async (request, reply) => {
+      const auth = request.authUser as JWTPayload;
+      const dek = (request.body?.encryption_key ?? "").trim();
+      if (!/^[0-9a-f]{64}$/i.test(dek)) {
+        return reply.status(400).send({
+          error: "invalid_request",
+          message: "encryption_key must be 64 hex chars.",
+        });
+      }
+      const row = fastify.db
+        .prepare<[string], SyncKeyRow>(
+          `SELECT encrypted_sync_key, sync_key_server_wrap, sync_key_e2ee_wrap, encryption_mode
+           FROM users WHERE id = ?`,
+        )
+        .get(auth.sub);
+      if (!row) return reply.status(404).send({ error: "user_not_found" });
+      if (normalizeMode(row) === "e2ee" && e2eeWrapOf(row) && !row.sync_key_server_wrap) {
+        return reply.status(409).send({
+          error: "e2ee_enabled",
+          message: "End-to-end encryption is enabled; disable it before using sign-in recovery.",
+        });
+      }
+      const wrap = encryptSyncDek(dek, fastify.jwtSecret);
+      fastify.db
+        .prepare<[string, string]>(
+          `UPDATE users SET
+             sync_key_server_wrap = ?,
+             encryption_mode = 'default',
+             updated_at = datetime('now')
+           WHERE id = ?`,
+        )
+        .run(wrap, auth.sub);
+      return reply.send({ ok: true, mode: "default" });
+    },
+  );
+
+  fastify.put<{ Body: { e2ee_wrap?: string; encrypted_sync_key?: string } }>(
+    "/user/sync-key/e2ee",
+    async (request, reply) => {
+      const auth = request.authUser as JWTPayload;
+      const wrap = (request.body?.e2ee_wrap || request.body?.encrypted_sync_key || "").trim();
+      if (!wrap) {
+        return reply.status(400).send({
+          error: "invalid_request",
+          message: "e2ee_wrap is required.",
+        });
+      }
+      fastify.db
+        .prepare<[string, string, string]>(
+          `UPDATE users SET
+             sync_key_e2ee_wrap = ?,
+             encrypted_sync_key = ?,
+             updated_at = datetime('now')
+           WHERE id = ?`,
+        )
+        .run(wrap, wrap, auth.sub);
+      return reply.send({ ok: true });
+    },
+  );
+
+  fastify.post("/user/sync-key/enable-e2ee", async (request, reply) => {
+    const auth = request.authUser as JWTPayload;
+    const row = fastify.db
+      .prepare<[string], SyncKeyRow>(
+        `SELECT encrypted_sync_key, sync_key_server_wrap, sync_key_e2ee_wrap, encryption_mode
+         FROM users WHERE id = ?`,
+      )
+      .get(auth.sub);
+    if (!row) return reply.status(404).send({ error: "user_not_found" });
+    const e2ee = e2eeWrapOf(row);
+    if (!e2ee) {
+      return reply.status(400).send({
+        error: "e2ee_wrap_missing",
+        message: "Store an E2EE wrap before enabling end-to-end encryption.",
+      });
+    }
+    fastify.db
+      .prepare<[string, string, string]>(
+        `UPDATE users SET
+           encryption_mode = 'e2ee',
+           sync_key_e2ee_wrap = ?,
+           encrypted_sync_key = ?,
+           sync_key_server_wrap = NULL,
+           updated_at = datetime('now')
+         WHERE id = ?`,
+      )
+      .run(e2ee, e2ee, auth.sub);
+    return reply.send({ ok: true, mode: "e2ee" });
+  });
+
+  fastify.post<{ Body: { encryption_key?: string; keep_e2ee_wrap?: boolean } }>(
+    "/user/sync-key/disable-e2ee",
+    async (request, reply) => {
+      const auth = request.authUser as JWTPayload;
+      const dek = (request.body?.encryption_key ?? "").trim();
+      if (!/^[0-9a-f]{64}$/i.test(dek)) {
+        return reply.status(400).send({
+          error: "invalid_request",
+          message: "encryption_key must be 64 hex chars.",
+        });
+      }
+      const wrap = encryptSyncDek(dek, fastify.jwtSecret);
+      const keep = request.body?.keep_e2ee_wrap !== false;
+      if (keep) {
+        fastify.db
+          .prepare<[string, string]>(
+            `UPDATE users SET
+               sync_key_server_wrap = ?,
+               encryption_mode = 'default',
+               updated_at = datetime('now')
+             WHERE id = ?`,
+          )
+          .run(wrap, auth.sub);
+      } else {
+        fastify.db
+          .prepare<[string, string]>(
+            `UPDATE users SET
+               sync_key_server_wrap = ?,
+               encryption_mode = 'default',
+               sync_key_e2ee_wrap = NULL,
+               encrypted_sync_key = NULL,
+               updated_at = datetime('now')
+             WHERE id = ?`,
+          )
+          .run(wrap, auth.sub);
+      }
+      return reply.send({ ok: true, mode: "default" });
+    },
+  );
+
+  fastify.post("/user/sync-key/unlock", async (request, reply) => {
+    const auth = request.authUser as JWTPayload;
+    const row = fastify.db
+      .prepare<[string], SyncKeyRow>(
+        `SELECT encrypted_sync_key, sync_key_server_wrap, sync_key_e2ee_wrap, encryption_mode
+         FROM users WHERE id = ?`,
+      )
+      .get(auth.sub);
+    if (!row) return reply.status(404).send({ error: "user_not_found" });
+    if (normalizeMode(row) === "e2ee") {
+      return reply.status(403).send({
+        error: "e2ee_enabled",
+        message: "End-to-end encryption is enabled; use your recovery code.",
+      });
+    }
+    if (!row.sync_key_server_wrap) {
+      return reply.status(404).send({
+        error: "no_server_wrap",
+        message: "No sign-in recovery key on server.",
+      });
+    }
+    try {
+      const encryptionKey = decryptSyncDek(row.sync_key_server_wrap, fastify.jwtSecret);
+      return reply.send({ encryption_key: encryptionKey, mode: "default" });
+    } catch {
+      return reply.status(500).send({ error: "unlock_failed" });
+    }
   });
 
   fastify.delete<{ Body: DeleteAccountBody }>(

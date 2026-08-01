@@ -20,6 +20,9 @@ export interface UserRow {
   plan: Plan;
   role: Role;
   encrypted_sync_key: string | null;
+  sync_key_server_wrap: string | null;
+  sync_key_e2ee_wrap: string | null;
+  encryption_mode: "default" | "e2ee" | string | null;
   /** NULL | 'completed' | 'skipped' — welcome guide disposition. */
   onboarding_status: OnboardingStatus | null;
   onboarding_status_at: string | null;
