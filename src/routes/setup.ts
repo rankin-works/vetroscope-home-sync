@@ -7,7 +7,7 @@
 
 import type { FastifyPluginAsync } from "fastify";
 
-import { hashPassword } from "../lib/crypto.js";
+import { hashPassword, TOKEN_HASH_ITERATIONS } from "../lib/crypto.js";
 import {
   createUser,
   issueTokens,
@@ -85,6 +85,7 @@ export const setupRoutes: FastifyPluginAsync = async (fastify) => {
       const candidate = await hashPassword(
         setup_token.trim().toUpperCase(),
         storedSalt,
+        TOKEN_HASH_ITERATIONS,
       );
       if (!constantTimeEquals(candidate, storedHash)) {
         return reply

@@ -7,7 +7,12 @@
 
 import type { FastifyPluginAsync } from "fastify";
 
-import { generateSalt, hashPassword, verifyPassword } from "../lib/crypto.js";
+import {
+  generateSalt,
+  hashPassword,
+  verifyPassword,
+  PBKDF2_ITERATIONS,
+} from "../lib/crypto.js";
 import { listDevices } from "../lib/device-service.js";
 import { issueTokens, MIN_PASSWORD_LENGTH } from "../lib/auth-service.js";
 import { encryptSyncDek, decryptSyncDek } from "../lib/secret-crypto.js";
@@ -175,6 +180,7 @@ export const userRoutes: FastifyPluginAsync = async (fastify) => {
         body.current_password,
         user.password_hash,
         user.password_salt,
+        user.password_iterations,
       );
       if (!valid) {
         return reply.status(401).send({ error: "invalid_password" });
@@ -190,15 +196,16 @@ export const userRoutes: FastifyPluginAsync = async (fastify) => {
       // with the old sessions still live.
       const tx = fastify.db.transaction(() => {
         fastify.db
-          .prepare<[string, string, number, string]>(
+          .prepare<[string, string, number, number, string]>(
             `UPDATE users SET
                password_hash = ?,
                password_salt = ?,
+               password_iterations = ?,
                token_version = ?,
                updated_at = datetime('now')
              WHERE id = ?`,
           )
-          .run(hash, salt, newVersion, auth.sub);
+          .run(hash, salt, PBKDF2_ITERATIONS, newVersion, auth.sub);
         fastify.db
           .prepare<[string]>("DELETE FROM refresh_tokens WHERE user_id = ?")
           .run(auth.sub);
@@ -554,6 +561,7 @@ export const userRoutes: FastifyPluginAsync = async (fastify) => {
         body.password,
         user.password_hash,
         user.password_salt,
+        user.password_iterations,
       );
       if (!valid) {
         return reply.status(401).send({ error: "invalid_password" });

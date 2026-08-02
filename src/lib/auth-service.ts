@@ -14,6 +14,7 @@ import {
   hashPassword,
   sha256,
   signJWT,
+  PBKDF2_ITERATIONS,
 } from "./crypto.js";
 
 export const ACCESS_TOKEN_EXPIRY_SECONDS = 60 * 60; // 1h
@@ -100,17 +101,18 @@ export async function createUser(
   const now = new Date().toISOString();
 
   db.prepare<
-    [string, string, string, string, string, Plan, Role, string, string]
+    [string, string, string, string, string, number, Plan, Role, string, string]
   >(
     `INSERT INTO users
-      (id, email, display_name, password_hash, password_salt, plan, role, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      (id, email, display_name, password_hash, password_salt, password_iterations, plan, role, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     id,
     email,
     input.displayName,
     hash,
     salt,
+    PBKDF2_ITERATIONS,
     HOME_PLAN,
     input.role,
     now,
@@ -123,6 +125,7 @@ export async function createUser(
     display_name: input.displayName,
     password_hash: hash,
     password_salt: salt,
+    password_iterations: PBKDF2_ITERATIONS,
     plan: HOME_PLAN,
     role: input.role,
     encrypted_sync_key: null,

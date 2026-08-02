@@ -8,7 +8,30 @@
 // makes every existing password unverifiable — locking every user out with
 // no recovery short of an admin reset. Add the migration path first.
 
-const PBKDF2_ITERATIONS = 100_000;
+// Iteration count for password hashes written from now on. OWASP's current
+// floor for PBKDF2-HMAC-SHA256 is 600k; the original 100k predates it.
+export const PBKDF2_ITERATIONS = 600_000;
+
+// What `users.password_hash` rows created before migration 025 were hashed
+// with. A NULL/absent `password_iterations` means "hashed at this count".
+// Never verify at the current default — that breaks every existing password.
+export const LEGACY_PBKDF2_ITERATIONS = 100_000;
+
+// Setup codes and invite codes are hashed with the same primitive but are a
+// different problem, and are pinned here on purpose:
+//
+//   1. They are server-generated 60-bit random codes, not user-chosen
+//      passwords. Brute force is bounded by their entropy, not by the KDF,
+//      so a heavier work factor buys almost nothing.
+//   2. Their hashes are already on disk. Raising the count would make every
+//      outstanding invite fail to verify — and a server whose first-boot
+//      setup code was issued but not yet redeemed could never be set up at
+//      all, with no way to reissue.
+//   3. consumeInvite() hashes once per outstanding invite to find a match,
+//      so the cost here is multiplied by the number of open invites on
+//      every registration attempt.
+export const TOKEN_HASH_ITERATIONS = 100_000;
+
 const SALT_LENGTH = 32;
 const HASH_LENGTH = 64;
 
@@ -39,6 +62,7 @@ export function generateSalt(): string {
 export async function hashPassword(
   password: string,
   salt: string,
+  iterations: number = PBKDF2_ITERATIONS,
 ): Promise<string> {
   const encoder = new TextEncoder();
   const keyMaterial = await crypto.subtle.importKey(
@@ -53,7 +77,7 @@ export async function hashPassword(
     {
       name: "PBKDF2",
       salt: hexToBuffer(salt),
-      iterations: PBKDF2_ITERATIONS,
+      iterations,
       hash: "SHA-256",
     },
     keyMaterial,
@@ -63,18 +87,50 @@ export async function hashPassword(
   return bufferToHex(derivedBits);
 }
 
+/**
+ * Verify against the iteration count the stored hash was actually produced
+ * with. Pass `users.password_iterations`; NULL or omitted is read as the
+ * legacy count, which is what pre-025 rows were hashed at.
+ */
 export async function verifyPassword(
   password: string,
   hash: string,
   salt: string,
+  iterations?: number | null,
 ): Promise<boolean> {
-  const computed = await hashPassword(password, salt);
+  const computed = await hashPassword(
+    password,
+    salt,
+    iterations ?? LEGACY_PBKDF2_ITERATIONS,
+  );
   if (computed.length !== hash.length) return false;
   let result = 0;
   for (let i = 0; i < computed.length; i++) {
     result |= computed.charCodeAt(i) ^ hash.charCodeAt(i);
   }
   return result === 0;
+}
+
+// A syntactically valid salt + hash that nothing verifies against, used to
+// spend the same work on an unknown email as on a real one. Without it, a
+// miss returns in ~0ms while a hit costs a full derivation, and that gap
+// enumerates which addresses have accounts.
+const DUMMY_SALT = "00".repeat(SALT_LENGTH);
+const DUMMY_HASH = "00".repeat(HASH_LENGTH);
+
+/**
+ * Spend a verification's worth of work and return false. Call on the
+ * user-not-found branch so its timing matches found-but-wrong-password.
+ *
+ * Costed at the CURRENT count, not the legacy one. Mid-migration there are
+ * two populations, and this choice decides which way the residual gap
+ * points: at the current count, unknown emails match upgraded accounts and
+ * only the shrinking legacy set answers faster. At the legacy count, every
+ * upgraded account would answer slower instead — a set that grows, so the
+ * oracle would worsen over time rather than closing.
+ */
+export async function verifyPasswordDummy(password: string): Promise<boolean> {
+  return verifyPassword(password, DUMMY_HASH, DUMMY_SALT, PBKDF2_ITERATIONS);
 }
 
 export async function sha256(input: string): Promise<string> {

@@ -19,7 +19,15 @@ import {
   MIN_PASSWORD_LENGTH,
 } from "../lib/auth-service.js";
 import { createUser } from "../lib/auth-service.js";
-import { sha256, verifyPassword } from "../lib/crypto.js";
+import {
+  generateSalt,
+  hashPassword,
+  sha256,
+  verifyPassword,
+  verifyPasswordDummy,
+  LEGACY_PBKDF2_ITERATIONS,
+  PBKDF2_ITERATIONS,
+} from "../lib/crypto.js";
 import {
   assertDeviceCapacity,
   DeviceLimitReachedError,
@@ -183,15 +191,48 @@ export const authRoutes: FastifyPluginAsync = async (fastify) => {
 
       const user = findUserByEmail(fastify.db, email);
       if (user === undefined) {
+        // Spend the same work as a real verification before answering, so
+        // the response time doesn't reveal whether the address has an
+        // account on this server.
+        await verifyPasswordDummy(password);
         return reply.status(401).send({ error: "invalid_credentials" });
       }
       const valid = await verifyPassword(
         password,
         user.password_hash,
         user.password_salt,
+        user.password_iterations,
       );
       if (!valid) {
         return reply.status(401).send({ error: "invalid_credentials" });
+      }
+
+      // Opportunistic work-factor upgrade: this is the one moment we hold
+      // the plaintext and know it's correct, so accounts migrate as their
+      // owners sign in rather than in a sweep. A failure here must not fail
+      // the login — the stored hash is still valid at its recorded count,
+      // so a missed upgrade just retries on the next sign-in.
+      const storedIterations =
+        user.password_iterations ?? LEGACY_PBKDF2_ITERATIONS;
+      if (storedIterations < PBKDF2_ITERATIONS) {
+        try {
+          const upgradedSalt = generateSalt();
+          const upgradedHash = await hashPassword(password, upgradedSalt);
+          fastify.db
+            .prepare<[string, string, number, string, number]>(
+              `UPDATE users SET password_hash = ?, password_salt = ?, password_iterations = ?
+               WHERE id = ? AND password_iterations = ?`,
+            )
+            .run(
+              upgradedHash,
+              upgradedSalt,
+              PBKDF2_ITERATIONS,
+              user.id,
+              storedIterations,
+            );
+        } catch (err) {
+          request.log.warn({ err }, "password rehash failed; will retry");
+        }
       }
 
       let resolvedDeviceId = device_id;

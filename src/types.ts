@@ -20,6 +20,12 @@ export interface UserRow {
   display_name: string;
   password_hash: string;
   password_salt: string;
+  /**
+   * PBKDF2 iteration count `password_hash` was produced with (025). Always
+   * pass this to verifyPassword — the current constant is for new hashes
+   * only, and rows migrate upward as their owners sign in.
+   */
+  password_iterations: number;
   plan: Plan;
   role: Role;
   encrypted_sync_key: string | null;

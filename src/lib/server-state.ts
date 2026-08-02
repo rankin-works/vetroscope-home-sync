@@ -5,7 +5,12 @@
 // these exactly once; steady-state reads hit a small whitelist of keys.
 
 import type { DB } from "../db.js";
-import { generateHumanCode, generateToken, hashPassword } from "./crypto.js";
+import {
+  generateHumanCode,
+  generateToken,
+  hashPassword,
+  TOKEN_HASH_ITERATIONS,
+} from "./crypto.js";
 
 export const SERVER_STATE_KEYS = {
   jwtSecret: "jwt_secret",
@@ -86,7 +91,11 @@ export async function bootstrapServerState(
   const jwtSecret = options.jwtSecretOverride ?? generateToken(32);
   const setupToken = generateHumanCode(3, 4);
   const setupSalt = generateToken(16);
-  const setupHash = await hashPassword(setupToken, setupSalt);
+  const setupHash = await hashPassword(
+    setupToken,
+    setupSalt,
+    TOKEN_HASH_ITERATIONS,
+  );
 
   const tx = db.transaction(() => {
     setState(db, SERVER_STATE_KEYS.jwtSecret, jwtSecret);

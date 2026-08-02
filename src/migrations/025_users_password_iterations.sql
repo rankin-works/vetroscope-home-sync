@@ -1,0 +1,13 @@
+-- SPDX-License-Identifier: Apache-2.0
+-- Record the PBKDF2 iteration count each password_hash was produced with, so
+-- the work factor can be raised without invalidating existing hashes.
+--
+-- Verification reads this column; the constant in the code is for NEW hashes
+-- only. Existing rows were hashed at 100k, which is the default here. A
+-- successful sign-in re-hashes at the current count and updates the column in
+-- place, so accounts migrate as their owners log in rather than in one sweep.
+--
+-- Note this covers user passwords only. Setup codes and invite codes are
+-- hashed with the same primitive but stay pinned at the original count — see
+-- TOKEN_HASH_ITERATIONS in src/lib/crypto.ts for why.
+ALTER TABLE users ADD COLUMN password_iterations INTEGER NOT NULL DEFAULT 100000;

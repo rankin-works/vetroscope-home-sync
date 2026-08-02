@@ -8,7 +8,12 @@ import { randomUUID } from "node:crypto";
 
 import type { DB } from "../db.js";
 import type { InviteRow, Role } from "../types.js";
-import { generateHumanCode, generateToken, hashPassword } from "./crypto.js";
+import {
+  generateHumanCode,
+  generateToken,
+  hashPassword,
+  TOKEN_HASH_ITERATIONS,
+} from "./crypto.js";
 
 const DEFAULT_TTL_HOURS = 24;
 
@@ -33,7 +38,11 @@ export async function createInvite(
   // and we keep the salt on the row so verifyInvite can recompute. We store
   // salt alongside by prefixing it on the hash column (salt + ':' + hash) to
   // avoid an additional schema column.
-  const hash = await hashPassword(token.toUpperCase(), salt);
+  const hash = await hashPassword(
+    token.toUpperCase(),
+    salt,
+    TOKEN_HASH_ITERATIONS,
+  );
   const expiresAt = new Date(Date.now() + ttlHours * 3600_000).toISOString();
 
   db.prepare<[string, string, string, Role, string]>(
@@ -59,7 +68,11 @@ export async function consumeInvite(
   for (const row of rows) {
     const [salt, hash] = row.token_hash.split(":", 2) as [string, string];
     if (salt === undefined || hash === undefined) continue;
-    const candidate = await hashPassword(token.toUpperCase(), salt);
+    const candidate = await hashPassword(
+      token.toUpperCase(),
+      salt,
+      TOKEN_HASH_ITERATIONS,
+    );
     if (timingSafeEqual(candidate, hash)) {
       const res = db
         .prepare<[string, string]>(

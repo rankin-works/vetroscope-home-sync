@@ -16,7 +16,11 @@ import { readFileSync } from "node:fs";
 import { openDatabase } from "../db.js";
 import { loadConfig } from "../env.js";
 import { createUser } from "../lib/auth-service.js";
-import { generateSalt, hashPassword } from "../lib/crypto.js";
+import {
+  generateSalt,
+  hashPassword,
+  PBKDF2_ITERATIONS,
+} from "../lib/crypto.js";
 import { runMigrations } from "../lib/migrations.js";
 import type { Role, UserRow } from "../types.js";
 import { VERSION } from "../version.js";
@@ -135,9 +139,18 @@ async function main(): Promise<void> {
       const salt = generateSalt();
       const hash = await hashPassword(password, salt);
       const tx = db.transaction(() => {
-        db.prepare<[string, string, string]>(
-          "UPDATE users SET password_hash = ?, password_salt = ?, updated_at = datetime('now') WHERE id = ?",
-        ).run(hash, salt, row.id);
+        // token_version bump matches the /user/password route: an admin
+        // resetting a password should also kill sessions whose access token
+        // hasn't expired, not just the refresh tokens.
+        db.prepare<[string, string, number, string]>(
+          `UPDATE users SET
+             password_hash = ?,
+             password_salt = ?,
+             password_iterations = ?,
+             token_version = token_version + 1,
+             updated_at = datetime('now')
+           WHERE id = ?`,
+        ).run(hash, salt, PBKDF2_ITERATIONS, row.id);
         db.prepare<[string]>(
           "DELETE FROM refresh_tokens WHERE user_id = ?",
         ).run(row.id);
