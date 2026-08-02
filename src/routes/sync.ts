@@ -135,6 +135,14 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
       // Refreshes on conflict alongside is_passive / tag_uuid / platform:
       // a later push may carry a corrected classification that should
       // overwrite an older one.
+      //
+      // Cross-tenant guard: `uuid` is a global PRIMARY KEY, so a push
+      // carrying another user's uuid would otherwise land as an UPDATE of
+      // their row. The conflict UPDATE only fires when the existing row
+      // already belongs to the authenticated user; a collision with
+      // another user's row (accidental or hostile) is dropped silently
+      // rather than overwriting it. Every uuid-keyed upsert below carries
+      // the same guard.
       `INSERT INTO sync_entries (uuid, user_id, device_id, timestamp, app_name, window_title, project, sub_project, is_adobe, is_passive, tag_uuid, platform, updated_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(uuid) DO UPDATE SET
@@ -143,7 +151,8 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
          tag_uuid = excluded.tag_uuid,
          platform = excluded.platform,
          updated_at = excluded.updated_at
-       WHERE excluded.updated_at > sync_entries.updated_at`,
+       WHERE sync_entries.user_id = excluded.user_id
+         AND excluded.updated_at > sync_entries.updated_at`,
     );
 
     const upsertTag = stmts.prepare<
@@ -182,7 +191,8 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
          deleted = excluded.deleted,
          archived = excluded.archived,
          updated_at = excluded.updated_at
-       WHERE excluded.updated_at > sync_tags.updated_at`,
+       WHERE sync_tags.user_id = excluded.user_id
+         AND excluded.updated_at > sync_tags.updated_at`,
     );
 
     const upsertGoal = stmts.prepare<
@@ -214,7 +224,8 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
          deleted = excluded.deleted,
          created_at = COALESCE(sync_goals.created_at, excluded.created_at),
          updated_at = excluded.updated_at
-       WHERE excluded.updated_at > sync_goals.updated_at`,
+       WHERE sync_goals.user_id = excluded.user_id
+         AND excluded.updated_at > sync_goals.updated_at`,
     );
 
     const upsertMarker = stmts.prepare<
@@ -240,7 +251,8 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
          icon = excluded.icon,
          deleted = excluded.deleted,
          updated_at = excluded.updated_at
-       WHERE excluded.updated_at > sync_markers.updated_at`,
+       WHERE sync_markers.user_id = excluded.user_id
+         AND excluded.updated_at > sync_markers.updated_at`,
     );
 
     const upsertAchievement = stmts.prepare<
@@ -316,7 +328,8 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
          project = excluded.project,
          deleted = excluded.deleted,
          updated_at = excluded.updated_at
-       WHERE excluded.updated_at > sync_tag_sticky_exclusions.updated_at`,
+       WHERE sync_tag_sticky_exclusions.user_id = excluded.user_id
+         AND excluded.updated_at > sync_tag_sticky_exclusions.updated_at`,
     );
 
     // Per-app allowlist rows for sticky_projects auto-tagging (011).
@@ -330,7 +343,8 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
          app_name = excluded.app_name,
          deleted = excluded.deleted,
          updated_at = excluded.updated_at
-       WHERE excluded.updated_at > sync_tag_sticky_project_apps.updated_at`,
+       WHERE sync_tag_sticky_project_apps.user_id = excluded.user_id
+         AND excluded.updated_at > sync_tag_sticky_project_apps.updated_at`,
     );
 
     // Per-breakdown allowlist rows for sticky_subprojects auto-tagging (011).
@@ -345,7 +359,8 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
          project = excluded.project,
          deleted = excluded.deleted,
          updated_at = excluded.updated_at
-       WHERE excluded.updated_at > sync_tag_sticky_subproject_scopes.updated_at`,
+       WHERE sync_tag_sticky_subproject_scopes.user_id = excluded.user_id
+         AND excluded.updated_at > sync_tag_sticky_subproject_scopes.updated_at`,
     );
 
     // Captured media URLs (Spotify track URIs, YouTube /watch URLs).
@@ -381,7 +396,8 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
          last_seen = excluded.last_seen,
          deleted = excluded.deleted,
          updated_at = excluded.updated_at
-       WHERE excluded.updated_at > sync_media_links.updated_at`,
+       WHERE sync_media_links.user_id = excluded.user_id
+         AND excluded.updated_at > sync_media_links.updated_at`,
     );
 
     // Custom reminders (008). title + body encrypted client-side;
@@ -448,7 +464,8 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
          deleted = excluded.deleted,
          last_fired_at = excluded.last_fired_at,
          updated_at = excluded.updated_at
-       WHERE excluded.updated_at > sync_reminders.updated_at`,
+       WHERE sync_reminders.user_id = excluded.user_id
+         AND excluded.updated_at > sync_reminders.updated_at`,
     );
 
     // Reminder notification history (014). Title, body, and icon data are
@@ -483,7 +500,8 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
          dismissed_at = excluded.dismissed_at,
          deleted = excluded.deleted,
          updated_at = excluded.updated_at
-       WHERE excluded.updated_at > sync_reminder_events.updated_at`,
+       WHERE sync_reminder_events.user_id = excluded.user_id
+         AND excluded.updated_at > sync_reminder_events.updated_at`,
     );
 
     const upsertEntryDismissal = stmts.prepare<
@@ -494,19 +512,44 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
        ON CONFLICT(uuid) DO UPDATE SET
          deleted = excluded.deleted,
          updated_at = excluded.updated_at
-       WHERE excluded.updated_at > sync_entry_dismissals.updated_at`,
+       WHERE sync_entry_dismissals.user_id = excluded.user_id
+         AND excluded.updated_at > sync_entry_dismissals.updated_at`,
     );
 
     const updateDeviceSync = stmts.prepare<[string, string, string]>(
       "UPDATE devices SET last_sync_at = ? WHERE id = ? AND user_id = ?",
     );
 
+    // `entries.device_id` is chosen by the client, and the row's owner is
+    // already pinned to the JWT's user, so this is integrity defense rather
+    // than an authorization boundary — it keeps device_id meaning what
+    // /sync/count and the admin tooling expect it to mean. We pre-fetch the
+    // caller's device set once and coerce any unknown id to the caller's own
+    // authenticated device rather than rejecting the batch: the desktop
+    // legitimately re-pushes entries it pulled from another device of the
+    // same user, and an unknown id is a wrong-shape value, not an attack
+    // worth failing the whole sync over.
+    let allowedDeviceIds: Set<string> | null = null;
+    if (body.entries?.length) {
+      const rows = fastify.db
+        .prepare<[string], { id: string }>(
+          "SELECT id FROM devices WHERE user_id = ?",
+        )
+        .all(userId);
+      allowedDeviceIds = new Set(rows.map((r) => r.id));
+    }
+    const callerDeviceId = auth.device_id;
+
     const tx = fastify.db.transaction(() => {
       for (const e of (body.entries ?? []).slice(0, BATCH_SIZE)) {
+        const safeDeviceId =
+          e.device_id && allowedDeviceIds!.has(e.device_id)
+            ? e.device_id
+            : callerDeviceId;
         upsertEntry.run(
           e.uuid,
           userId,
-          e.device_id,
+          safeDeviceId,
           e.timestamp,
           e.app_name,
           e.window_title,
