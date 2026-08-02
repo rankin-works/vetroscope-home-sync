@@ -10,8 +10,9 @@ import type { FastifyPluginAsync } from "fastify";
 
 import { generateSalt, hashPassword, verifyPassword } from "../lib/crypto.js";
 import { listDevices } from "../lib/device-service.js";
-import { MIN_PASSWORD_LENGTH } from "../lib/auth-service.js";
+import { issueTokens, MIN_PASSWORD_LENGTH } from "../lib/auth-service.js";
 import { encryptSyncDek, decryptSyncDek } from "../lib/secret-crypto.js";
+import { buildRateLimiter } from "../middleware/ratelimit.js";
 import type { JWTPayload, UserRow } from "../types.js";
 
 type SyncKeyRow = {
@@ -63,7 +64,8 @@ export const userRoutes: FastifyPluginAsync = async (fastify) => {
     }
     const devices = listDevices(fastify.db, auth.sub);
     const onboardingStatus =
-      user.onboarding_status === "completed" || user.onboarding_status === "skipped"
+      user.onboarding_status === "completed" ||
+      user.onboarding_status === "skipped"
         ? user.onboarding_status
         : null;
     return reply.send({
@@ -139,9 +141,9 @@ export const userRoutes: FastifyPluginAsync = async (fastify) => {
         });
       }
       fastify.db
-        .prepare<[string, string]>(
-          "UPDATE users SET display_name = ?, updated_at = datetime('now') WHERE id = ?",
-        )
+        .prepare<
+          [string, string]
+        >("UPDATE users SET display_name = ?, updated_at = datetime('now') WHERE id = ?")
         .run(name, auth.sub);
       return reply.send({ ok: true, display_name: name });
     },
@@ -180,12 +182,50 @@ export const userRoutes: FastifyPluginAsync = async (fastify) => {
       }
       const salt = generateSalt();
       const hash = await hashPassword(body.new_password, salt);
-      fastify.db
-        .prepare<[string, string, string]>(
-          "UPDATE users SET password_hash = ?, password_salt = ?, updated_at = datetime('now') WHERE id = ?",
-        )
-        .run(hash, salt, auth.sub);
-      return reply.send({ ok: true });
+      const newVersion = (user.token_version ?? 0) + 1;
+
+      // A password change should end every other session, including ones
+      // whose access token hasn't expired yet. Deleting refresh_tokens stops
+      // renewal; bumping token_version kills the outstanding access tokens.
+      // Both in one transaction so a crash can't leave the password changed
+      // with the old sessions still live.
+      const tx = fastify.db.transaction(() => {
+        fastify.db
+          .prepare<[string, string, number, string]>(
+            `UPDATE users SET
+               password_hash = ?,
+               password_salt = ?,
+               token_version = ?,
+               updated_at = datetime('now')
+             WHERE id = ?`,
+          )
+          .run(hash, salt, newVersion, auth.sub);
+        fastify.db
+          .prepare<[string]>("DELETE FROM refresh_tokens WHERE user_id = ?")
+          .run(auth.sub);
+      });
+      tx();
+
+      // Re-issue for the caller's own device so the person who just changed
+      // their password isn't signed out by their own action. The client
+      // persists these; without them its next request would 401 on the
+      // now-stale token_version.
+      const tokens = await issueTokens(
+        fastify.db,
+        fastify.jwtSecret,
+        {
+          ...user,
+          password_hash: hash,
+          password_salt: salt,
+          token_version: newVersion,
+        },
+        auth.device_id,
+      );
+      return reply.send({
+        ok: true,
+        message: "Signed out on all other devices.",
+        ...tokens,
+      });
     },
   );
 
@@ -201,23 +241,24 @@ export const userRoutes: FastifyPluginAsync = async (fastify) => {
         });
       }
       const device = fastify.db
-        .prepare<[string, string], { id: string }>(
-          "SELECT id FROM devices WHERE id = ? AND user_id = ?",
-        )
+        .prepare<
+          [string, string],
+          { id: string }
+        >("SELECT id FROM devices WHERE id = ? AND user_id = ?")
         .get(deviceId, auth.sub);
       if (device === undefined) {
         return reply.status(404).send({ error: "not_found" });
       }
       const tx = fastify.db.transaction(() => {
         fastify.db
-          .prepare<[string, string]>(
-            "DELETE FROM refresh_tokens WHERE device_id = ? AND user_id = ?",
-          )
+          .prepare<
+            [string, string]
+          >("DELETE FROM refresh_tokens WHERE device_id = ? AND user_id = ?")
           .run(deviceId, auth.sub);
         fastify.db
-          .prepare<[string, string]>(
-            "DELETE FROM devices WHERE id = ? AND user_id = ?",
-          )
+          .prepare<
+            [string, string]
+          >("DELETE FROM devices WHERE id = ? AND user_id = ?")
           .run(deviceId, auth.sub);
       });
       tx();
@@ -249,9 +290,9 @@ export const userRoutes: FastifyPluginAsync = async (fastify) => {
           .run(body.encrypted_sync_key, body.encrypted_sync_key, auth.sub);
       } catch {
         fastify.db
-          .prepare<[string, string]>(
-            "UPDATE users SET encrypted_sync_key = ?, updated_at = datetime('now') WHERE id = ?",
-          )
+          .prepare<
+            [string, string]
+          >("UPDATE users SET encrypted_sync_key = ?, updated_at = datetime('now') WHERE id = ?")
           .run(body.encrypted_sync_key, auth.sub);
       }
       return reply.send({ ok: true });
@@ -270,9 +311,10 @@ export const userRoutes: FastifyPluginAsync = async (fastify) => {
         .get(auth.sub);
     } catch {
       const legacy = fastify.db
-        .prepare<[string], { encrypted_sync_key: string | null }>(
-          "SELECT encrypted_sync_key FROM users WHERE id = ?",
-        )
+        .prepare<
+          [string],
+          { encrypted_sync_key: string | null }
+        >("SELECT encrypted_sync_key FROM users WHERE id = ?")
         .get(auth.sub);
       if (!legacy) {
         return reply.status(404).send({ error: "user_not_found" });
@@ -318,13 +360,22 @@ export const userRoutes: FastifyPluginAsync = async (fastify) => {
         )
         .get(auth.sub);
       if (!row) return reply.status(404).send({ error: "user_not_found" });
-      if (normalizeMode(row) === "e2ee" && e2eeWrapOf(row) && !row.sync_key_server_wrap) {
+      if (
+        normalizeMode(row) === "e2ee" &&
+        e2eeWrapOf(row) &&
+        !row.sync_key_server_wrap
+      ) {
         return reply.status(409).send({
           error: "e2ee_enabled",
-          message: "End-to-end encryption is enabled; disable it before using sign-in recovery.",
+          message:
+            "End-to-end encryption is enabled; disable it before using sign-in recovery.",
         });
       }
-      const wrap = encryptSyncDek(dek, fastify.jwtSecret);
+      const wrap = encryptSyncDek(
+        dek,
+        fastify.jwtSecret,
+        fastify.config.syncDekKek,
+      );
       fastify.db
         .prepare<[string, string]>(
           `UPDATE users SET
@@ -342,7 +393,11 @@ export const userRoutes: FastifyPluginAsync = async (fastify) => {
     "/user/sync-key/e2ee",
     async (request, reply) => {
       const auth = request.authUser as JWTPayload;
-      const wrap = (request.body?.e2ee_wrap || request.body?.encrypted_sync_key || "").trim();
+      const wrap = (
+        request.body?.e2ee_wrap ||
+        request.body?.encrypted_sync_key ||
+        ""
+      ).trim();
       if (!wrap) {
         return reply.status(400).send({
           error: "invalid_request",
@@ -403,7 +458,11 @@ export const userRoutes: FastifyPluginAsync = async (fastify) => {
           message: "encryption_key must be 64 hex chars.",
         });
       }
-      const wrap = encryptSyncDek(dek, fastify.jwtSecret);
+      const wrap = encryptSyncDek(
+        dek,
+        fastify.jwtSecret,
+        fastify.config.syncDekKek,
+      );
       const keep = request.body?.keep_e2ee_wrap !== false;
       if (keep) {
         fastify.db
@@ -432,34 +491,48 @@ export const userRoutes: FastifyPluginAsync = async (fastify) => {
     },
   );
 
-  fastify.post("/user/sync-key/unlock", async (request, reply) => {
-    const auth = request.authUser as JWTPayload;
-    const row = fastify.db
-      .prepare<[string], SyncKeyRow>(
-        `SELECT encrypted_sync_key, sync_key_server_wrap, sync_key_e2ee_wrap, encryption_mode
+  // /user/sync-key/unlock hands back the plaintext data-encryption key, so
+  // it's the highest-value authenticated route on the server. A per-IP cap
+  // bounds how fast a stolen access token can be turned into the key, and
+  // costs a legitimate client nothing — it unlocks once per session.
+  const unlockLimiter = buildRateLimiter({ limit: 30, windowMs: 60_000 });
+
+  fastify.post(
+    "/user/sync-key/unlock",
+    { preHandler: unlockLimiter },
+    async (request, reply) => {
+      const auth = request.authUser as JWTPayload;
+      const row = fastify.db
+        .prepare<[string], SyncKeyRow>(
+          `SELECT encrypted_sync_key, sync_key_server_wrap, sync_key_e2ee_wrap, encryption_mode
          FROM users WHERE id = ?`,
-      )
-      .get(auth.sub);
-    if (!row) return reply.status(404).send({ error: "user_not_found" });
-    if (normalizeMode(row) === "e2ee") {
-      return reply.status(403).send({
-        error: "e2ee_enabled",
-        message: "End-to-end encryption is enabled; use your recovery code.",
-      });
-    }
-    if (!row.sync_key_server_wrap) {
-      return reply.status(404).send({
-        error: "no_server_wrap",
-        message: "No sign-in recovery key on server.",
-      });
-    }
-    try {
-      const encryptionKey = decryptSyncDek(row.sync_key_server_wrap, fastify.jwtSecret);
-      return reply.send({ encryption_key: encryptionKey, mode: "default" });
-    } catch {
-      return reply.status(500).send({ error: "unlock_failed" });
-    }
-  });
+        )
+        .get(auth.sub);
+      if (!row) return reply.status(404).send({ error: "user_not_found" });
+      if (normalizeMode(row) === "e2ee") {
+        return reply.status(403).send({
+          error: "e2ee_enabled",
+          message: "End-to-end encryption is enabled; use your recovery code.",
+        });
+      }
+      if (!row.sync_key_server_wrap) {
+        return reply.status(404).send({
+          error: "no_server_wrap",
+          message: "No sign-in recovery key on server.",
+        });
+      }
+      try {
+        const encryptionKey = decryptSyncDek(
+          row.sync_key_server_wrap,
+          fastify.jwtSecret,
+          fastify.config.syncDekKek,
+        );
+        return reply.send({ encryption_key: encryptionKey, mode: "default" });
+      } catch {
+        return reply.status(500).send({ error: "unlock_failed" });
+      }
+    },
+  );
 
   fastify.delete<{ Body: DeleteAccountBody }>(
     "/user/account",
@@ -491,11 +564,13 @@ export const userRoutes: FastifyPluginAsync = async (fastify) => {
       // becomes unadministerable. The user can `docker exec … vhs-cli
       // create-user` a replacement admin first.
       if (user.role === "admin") {
-        const adminCount = fastify.db
-          .prepare<[], { n: number }>(
-            "SELECT COUNT(*) AS n FROM users WHERE role = 'admin'",
-          )
-          .get()?.n ?? 0;
+        const adminCount =
+          fastify.db
+            .prepare<
+              [],
+              { n: number }
+            >("SELECT COUNT(*) AS n FROM users WHERE role = 'admin'")
+            .get()?.n ?? 0;
         if (adminCount <= 1) {
           return reply.status(409).send({
             error: "last_admin",
@@ -506,7 +581,9 @@ export const userRoutes: FastifyPluginAsync = async (fastify) => {
       }
 
       // CASCADE covers devices, refresh_tokens, sync_*, password_resets.
-      fastify.db.prepare<[string]>("DELETE FROM users WHERE id = ?").run(auth.sub);
+      fastify.db
+        .prepare<[string]>("DELETE FROM users WHERE id = ?")
+        .run(auth.sub);
       return reply.send({ ok: true });
     },
   );

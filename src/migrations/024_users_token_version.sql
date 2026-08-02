@@ -1,0 +1,13 @@
+-- SPDX-License-Identifier: Apache-2.0
+-- Per-user token generation counter for bulk session revocation.
+--
+-- Access tokens are stateless HS256 JWTs with a 1h lifetime, so deleting a
+-- user's refresh_tokens rows only stops *renewal* — an access token already
+-- in an attacker's hands stays valid until it expires. `token_version` is
+-- stamped into every JWT at issue time and re-checked on each authenticated
+-- request; bumping the column invalidates every outstanding access token for
+-- that user immediately.
+--
+-- Defaults to 0 so tokens issued before this migration (which carry no
+-- token_version claim, and are read as 0) keep working until they expire.
+ALTER TABLE users ADD COLUMN token_version INTEGER NOT NULL DEFAULT 0;

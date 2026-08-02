@@ -305,6 +305,7 @@ services:
 | `VS_PORT` | `4437` | HTTP(S) listen port. `4437` picked because it's unassigned by IANA |
 | `VS_SERVER_NAME` | hostname | Friendly name shown in the client |
 | `VS_JWT_SECRET` | auto-generated | Persisted in `server_state` after first boot |
+| `VS_SYNC_DEK_KEK` | unset | Optional 32-byte key (64 hex chars or base64) used to wrap sync data-encryption keys for sign-in recovery. When unset, the wrapping key is derived from the JWT secret, which means `vhs-cli rotate-jwt-secret` renders existing wraps unreadable. Setting it decouples the two. Wraps written before it was set stay readable; new wraps are tagged `v2:` and require the KEK. **Losing this value after wraps exist makes sign-in recovery unrecoverable** — back it up with the same care as the database. Generate with `openssl rand -hex 32`. |
 | `VS_TLS_CERT`, `VS_TLS_KEY` | unset | Paths to PEM files. If both set, server listens over HTTPS instead of HTTP. |
 | `VS_MAX_DEVICES_PER_USER` | `10` | Per-user device cap. Higher default than cloud's 5 since it's your server. |
 | `VS_ALLOW_REGISTRATION` | `invite` | `open` (anyone can register), `invite` (only via invite token), `closed` (only the admin can add users via CLI) |

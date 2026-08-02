@@ -16,6 +16,7 @@ export interface Config {
   readonly host: string;
   readonly serverName: string;
   readonly jwtSecretOverride: string | null;
+  readonly syncDekKek: string | null;
   readonly tlsCertPath: string | null;
   readonly tlsKeyPath: string | null;
   readonly maxDevicesPerUser: number;
@@ -74,12 +75,30 @@ export function loadConfig(): Config {
     );
   }
 
+  // Optional wrapping key for sync DEKs, decoupling secrets-at-rest from the
+  // JWT signing secret. Validated at boot so a malformed value fails the
+  // container start rather than the first /user/sync-key/unlock — by which
+  // point a user is staring at an unlock error with no idea why.
+  const syncDekKek = readOptionalString("VS_SYNC_DEK_KEK");
+  if (syncDekKek !== null) {
+    const bytes = /^[0-9a-f]{64}$/i.test(syncDekKek)
+      ? 32
+      : Buffer.from(syncDekKek, "base64").length;
+    if (bytes !== 32) {
+      throw new Error(
+        "Invalid VS_SYNC_DEK_KEK — must be 32 bytes (64 hex chars or base64). " +
+          "Generate one with: openssl rand -hex 32",
+      );
+    }
+  }
+
   return {
     dataDir: readString("VS_DATA_DIR", "/data"),
     port: readInt("VS_PORT", 4437),
     host: readString("VS_HOST", "0.0.0.0"),
     serverName: readString("VS_SERVER_NAME", hostname()),
     jwtSecretOverride: readOptionalString("VS_JWT_SECRET"),
+    syncDekKek,
     tlsCertPath,
     tlsKeyPath,
     maxDevicesPerUser: readInt("VS_MAX_DEVICES_PER_USER", 10),

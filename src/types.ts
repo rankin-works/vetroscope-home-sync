@@ -26,6 +26,12 @@ export interface UserRow {
   /** NULL | 'completed' | 'skipped' — welcome guide disposition. */
   onboarding_status: OnboardingStatus | null;
   onboarding_status_at: string | null;
+  /**
+   * Generation counter for this user's access tokens (024). Stamped into
+   * every JWT at issue; a mismatch against the row invalidates the token.
+   * Bumped whenever every session should die at once (password change).
+   */
+  token_version: number;
   created_at: string;
   updated_at: string;
 }
@@ -68,6 +74,13 @@ export interface JWTPayload {
   plan: Plan;
   role: Role;
   device_id: string;
+  /**
+   * Snapshot of users.token_version at issue time (024). Absent on tokens
+   * minted before the column existed — the middleware reads a missing claim
+   * as 0, which matches the column default, so pre-024 tokens stay valid
+   * until they expire on their own.
+   */
+  token_version?: number;
   iat: number;
   exp: number;
 }

@@ -9,7 +9,11 @@
 // is still technically signed" edge case without adding a second
 // round-trip per request. Cheap: single indexed lookup by id.
 
-import type { FastifyReply, FastifyRequest, preHandlerHookHandler } from "fastify";
+import type {
+  FastifyReply,
+  FastifyRequest,
+  preHandlerHookHandler,
+} from "fastify";
 
 import { verifyJWT } from "../lib/crypto.js";
 import type { JWTPayload, Role } from "../types.js";
@@ -28,18 +32,35 @@ export function buildAuthenticate(): preHandlerHookHandler {
     }
 
     const token = header.slice("Bearer ".length).trim();
-    const payload = await verifyJWT<JWTPayload>(token, request.server.jwtSecret);
+    const payload = await verifyJWT<JWTPayload>(
+      token,
+      request.server.jwtSecret,
+    );
     if (payload === null) {
       return reply.status(401).send({ error: "invalid_token" });
     }
 
     // Confirm the user still exists. Avoids the surprise where a removed
     // admin's still-valid token keeps working until exp.
-    const exists = request.server.db
-      .prepare<[string], { id: string }>("SELECT id FROM users WHERE id = ?")
+    const row = request.server.db
+      .prepare<
+        [string],
+        { id: string; token_version: number }
+      >("SELECT id, token_version FROM users WHERE id = ?")
       .get(payload.sub);
-    if (exists === undefined) {
+    if (row === undefined) {
       return reply.status(401).send({ error: "user_not_found" });
+    }
+
+    // Access tokens are stateless and live for an hour, so revoking refresh
+    // tokens alone can't cut off a session already in flight. A bumped
+    // token_version (password change) invalidates every outstanding access
+    // token for the user on the next request. Tokens minted before 024 carry
+    // no claim and read as 0, matching the column default.
+    const claimVersion =
+      typeof payload.token_version === "number" ? payload.token_version : 0;
+    if (row.token_version !== claimVersion) {
+      return reply.status(401).send({ error: "token_revoked" });
     }
 
     request.authUser = payload;

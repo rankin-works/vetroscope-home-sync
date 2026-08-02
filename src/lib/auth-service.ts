@@ -46,6 +46,7 @@ export async function issueTokens(
     plan: user.plan,
     role: user.role,
     device_id: deviceId,
+    token_version: user.token_version ?? 0,
     iat: now,
     exp: now + ACCESS_TOKEN_EXPIRY_SECONDS,
   };
@@ -104,7 +105,17 @@ export async function createUser(
     `INSERT INTO users
       (id, email, display_name, password_hash, password_salt, plan, role, created_at, updated_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-  ).run(id, email, input.displayName, hash, salt, HOME_PLAN, input.role, now, now);
+  ).run(
+    id,
+    email,
+    input.displayName,
+    hash,
+    salt,
+    HOME_PLAN,
+    input.role,
+    now,
+    now,
+  );
 
   return {
     id,
@@ -120,6 +131,7 @@ export async function createUser(
     encryption_mode: "default",
     onboarding_status: null,
     onboarding_status_at: null,
+    token_version: 0,
     created_at: now,
     updated_at: now,
   };
@@ -127,9 +139,7 @@ export async function createUser(
 
 export function findUserByEmail(db: DB, email: string): UserRow | undefined {
   return db
-    .prepare<[string], UserRow>(
-      "SELECT * FROM users WHERE email = ?",
-    )
+    .prepare<[string], UserRow>("SELECT * FROM users WHERE email = ?")
     .get(email.toLowerCase());
 }
 
@@ -140,7 +150,8 @@ export function findUserById(db: DB, id: string): UserRow | undefined {
 }
 
 export function countUsers(db: DB): number {
-  return db
-    .prepare<[], { n: number }>("SELECT COUNT(*) AS n FROM users")
-    .get()?.n ?? 0;
+  return (
+    db.prepare<[], { n: number }>("SELECT COUNT(*) AS n FROM users").get()?.n ??
+    0
+  );
 }
