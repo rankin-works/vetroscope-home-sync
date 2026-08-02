@@ -12,6 +12,7 @@ import {
   generateHumanCode,
   generateToken,
   hashPassword,
+  sha256,
   TOKEN_HASH_ITERATIONS,
 } from "./crypto.js";
 
@@ -34,21 +35,23 @@ export async function createInvite(
   const id = randomUUID();
   const token = generateHumanCode(3, 4);
   const salt = generateToken(16);
-  // The id acts as the salt-bearing locator: token_hash = PBKDF2(token, salt),
-  // and we keep the salt on the row so verifyInvite can recompute. We store
-  // salt alongside by prefixing it on the hash column (salt + ':' + hash) to
-  // avoid an additional schema column.
+  // token_hash carries its own salt inline (salt + ':' + hash) so the row is
+  // self-describing without an extra column. That salt is per-row, which is
+  // why finding a row by code needs the separate locator below.
   const hash = await hashPassword(
     token.toUpperCase(),
     salt,
     TOKEN_HASH_ITERATIONS,
   );
+  // Fast indexed locator (026). Selects the candidate row only — token_hash
+  // is still what authorizes it.
+  const lookup = await sha256(token.toUpperCase());
   const expiresAt = new Date(Date.now() + ttlHours * 3600_000).toISOString();
 
-  db.prepare<[string, string, string, Role, string]>(
-    `INSERT INTO invites (id, token_hash, created_by, role, expires_at)
-     VALUES (?, ?, ?, ?, ?)`,
-  ).run(id, `${salt}:${hash}`, createdBy, role, expiresAt);
+  db.prepare<[string, string, string, string, Role, string]>(
+    `INSERT INTO invites (id, token_hash, token_lookup, created_by, role, expires_at)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+  ).run(id, `${salt}:${hash}`, lookup, createdBy, role, expiresAt);
 
   return { id, token, expires_at: expiresAt, role };
 }
@@ -58,12 +61,32 @@ export async function consumeInvite(
   token: string,
 ): Promise<InviteRow | null> {
   const now = new Date().toISOString();
-  const rows = db
-    .prepare<[string], InviteRow>(
+  const normalized = token.toUpperCase();
+
+  // Fast path (026): find the one candidate row by its indexed digest, then
+  // verify it properly. Bounds the work for a registration attempt at a
+  // single key derivation regardless of how many invites are outstanding —
+  // without this, an unauthenticated caller could spend O(open invites)
+  // derivations per request.
+  const lookup = await sha256(normalized);
+  const direct = db
+    .prepare<[string, string], InviteRow>(
       `SELECT * FROM invites
-         WHERE used_at IS NULL AND expires_at > ?`,
+         WHERE token_lookup = ? AND used_at IS NULL AND expires_at > ?`,
     )
-    .all(now);
+    .get(lookup, now);
+
+  // Slow path: rows created before 026 have no locator and can't be given
+  // one (the stored hash is salted and one-way), so they still need the
+  // scan. Bounded by the 30-day TTL — the set drains on its own.
+  const rows = direct
+    ? [direct]
+    : db
+        .prepare<[string], InviteRow>(
+          `SELECT * FROM invites
+             WHERE token_lookup IS NULL AND used_at IS NULL AND expires_at > ?`,
+        )
+        .all(now);
 
   for (const row of rows) {
     const [salt, hash] = row.token_hash.split(":", 2) as [string, string];

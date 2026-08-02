@@ -111,9 +111,32 @@ server {
 }
 ```
 
-Home Sync's Fastify config has `trustProxy: true`, so
-`X-Forwarded-*` headers from a proxy on the same network are
-honored for logging and the rate limiter's per-IP keying.
+## Tell the server it's behind a proxy
+
+Whichever proxy you use, set `VS_TRUST_PROXY=true` on the container:
+
+```yaml
+environment:
+  VS_TRUST_PROXY: "true"
+```
+
+Without it the server treats every request as coming from the proxy,
+because that is literally the address it sees. Logs then show the proxy
+for every client, and — more importantly — the rate limiter puts all of
+your devices in one bucket, so several devices signing in at once can
+trip a 429 meant for one attacker. The server logs a warning the first
+time it sees an `X-Forwarded-For` it has been told to ignore.
+
+**Only set it when a proxy really is in front.** The header is just a
+request header: anyone who can reach the server directly can put whatever
+they like in it. With it trusted and no proxy in the way, a caller can
+change the value on every request and get a fresh rate-limit bucket each
+time, which removes the cap on password and setup-code guessing. That is
+why it is off by default and opt-in rather than the reverse.
+
+If only some upstreams should be believed, the variable also accepts a
+hop count (`VS_TRUST_PROXY=1`) or a comma-separated address/CIDR
+allowlist (`VS_TRUST_PROXY=10.0.0.0/8,172.16.0.0/12`).
 
 ## Cloudflare Tunnel
 

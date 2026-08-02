@@ -17,6 +17,13 @@ export interface Config {
   readonly serverName: string;
   readonly jwtSecretOverride: string | null;
   readonly syncDekKek: string | null;
+  /**
+   * What to tell Fastify about proxies in front of us. `false` (default)
+   * means the peer socket address is the client address. Anything else is
+   * handed to Fastify's `trustProxy`: `true`, a hop count, or a
+   * comma-separated list of trusted addresses/CIDRs.
+   */
+  readonly trustProxy: boolean | number | string;
   readonly tlsCertPath: string | null;
   readonly tlsKeyPath: string | null;
   readonly maxDevicesPerUser: number;
@@ -66,6 +73,20 @@ function readEnum<T extends string>(
   return raw as T;
 }
 
+function readTrustProxy(): boolean | number | string {
+  const raw = process.env.VS_TRUST_PROXY;
+  if (raw === undefined || raw === "") return false;
+  const v = raw.trim().toLowerCase();
+  if (v === "false" || v === "0" || v === "no") return false;
+  if (v === "true" || v === "yes") return true;
+  // A bare integer is a hop count ("trust the Nth address from the right").
+  if (/^\d+$/.test(v)) return Number.parseInt(v, 10);
+  // Otherwise treat it as an address / CIDR allowlist and let Fastify parse
+  // it. A typo here fails closed at boot rather than silently trusting
+  // everything, which is the failure direction we want.
+  return raw.trim();
+}
+
 export function loadConfig(): Config {
   const tlsCertPath = readOptionalString("VS_TLS_CERT");
   const tlsKeyPath = readOptionalString("VS_TLS_KEY");
@@ -74,6 +95,19 @@ export function loadConfig(): Config {
       "VS_TLS_CERT and VS_TLS_KEY must either both be set or both unset",
     );
   }
+
+  // Whether to believe X-Forwarded-For. This defaults to OFF because the
+  // rate limiters key on request.ip: with blind trust and no proxy actually
+  // in front of the container, anyone can rotate the header per request and
+  // give themselves a fresh bucket every time, which removes the cap on
+  // password and setup-code guessing entirely.
+  //
+  // The cost of the safe default is that a genuinely proxied deployment
+  // sees every client as the proxy's address and shares one bucket, so
+  // operators behind Caddy/Traefik/nginx should set this. Accepts `true`,
+  // a hop count, or a list of trusted addresses/CIDRs when only some
+  // upstreams should be believed.
+  const trustProxy = readTrustProxy();
 
   // Optional wrapping key for sync DEKs, decoupling secrets-at-rest from the
   // JWT signing secret. Validated at boot so a malformed value fails the
@@ -99,6 +133,7 @@ export function loadConfig(): Config {
     serverName: readString("VS_SERVER_NAME", hostname()),
     jwtSecretOverride: readOptionalString("VS_JWT_SECRET"),
     syncDekKek,
+    trustProxy,
     tlsCertPath,
     tlsKeyPath,
     maxDevicesPerUser: readInt("VS_MAX_DEVICES_PER_USER", 10),

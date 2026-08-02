@@ -308,12 +308,13 @@ services:
 | `VS_PORT` | `4437` | HTTP(S) listen port. `4437` picked because it's unassigned by IANA |
 | `VS_SERVER_NAME` | hostname | Friendly name shown in the client |
 | `VS_JWT_SECRET` | auto-generated | Persisted in `server_state` after first boot |
+| `VS_TRUST_PROXY` | `false` | Whether to believe `X-Forwarded-For` when deciding a client's address. **Set this if a reverse proxy sits in front of the container** — otherwise every client looks like the proxy and they all share one rate-limit bucket. **Leave it off if the server is reachable directly**: the header is trivially forged, and trusting it lets a caller mint a fresh rate-limit bucket per request, removing the cap on password and setup-code guessing. Accepts `true`, a hop count (`1`), or a comma-separated address/CIDR allowlist. |
 | `VS_SYNC_DEK_KEK` | unset | Optional 32-byte key (64 hex chars or base64) used to wrap sync data-encryption keys for sign-in recovery. When unset, the wrapping key is derived from the JWT secret, which means `vhs-cli rotate-jwt-secret` renders existing wraps unreadable. Setting it decouples the two. Wraps written before it was set stay readable; new wraps are tagged `v2:` and require the KEK. **Losing this value after wraps exist makes sign-in recovery unrecoverable** — back it up with the same care as the database. Generate with `openssl rand -hex 32`. |
 | `VS_TLS_CERT`, `VS_TLS_KEY` | unset | Paths to PEM files. If both set, server listens over HTTPS instead of HTTP. |
 | `VS_MAX_DEVICES_PER_USER` | `10` | Per-user device cap. Higher default than cloud's 5 since it's your server. |
 | `VS_ALLOW_REGISTRATION` | `invite` | `open` (anyone can register), `invite` (only via invite token), `closed` (only the admin can add users via CLI) |
 | `VS_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` |
-| `VS_ENABLE_METRICS` | `false` | When true, adds a `/metrics` Prometheus endpoint |
+| `VS_ENABLE_METRICS` | `false` | When true, adds a `/metrics` Prometheus endpoint and includes account count + database size in `/health`. Both are operator metrics on an unauthenticated route, so they stay off by default. |
 
 ### First-boot experience
 
@@ -382,9 +383,18 @@ Plain HTTP. Works fine for trusted home networks. Docs are upfront:
 
 ### Rate limiting
 
-In-memory token bucket per IP for `/auth/*` endpoints. Not a scalable
-design, but fine for a single-server deployment with a handful of
-devices. Returns 429 after 10 attempts/minute.
+In-memory token bucket per client address, covering `/auth/*`, `/setup`,
+and `/user/sync-key/unlock`. Not a scalable design, but fine for a
+single-server deployment with a handful of devices. Returns 429 after 10
+attempts/minute on the auth routes.
+
+The client address comes from the peer socket unless `VS_TRUST_PROXY` says
+otherwise. This matters more than it looks: the bucket key is the only
+thing standing between an attacker and unlimited password or setup-code
+guesses, so a forwarded header is believed only when an operator has said
+a proxy is actually there. Behind a proxy without the flag set, every
+client shares one bucket — the server logs a warning the first time it
+sees a forwarded header it has been told to ignore.
 
 ### Secrets
 

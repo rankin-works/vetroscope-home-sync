@@ -70,6 +70,9 @@ export interface RefreshTokenRow {
 export interface InviteRow {
   id: string;
   token_hash: string;
+  /** SHA-256 of the code, indexed, used only to locate the row (026).
+   *  NULL on invites issued before the column existed. */
+  token_lookup: string | null;
   created_by: string;
   role: Role;
   expires_at: string;

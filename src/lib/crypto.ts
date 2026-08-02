@@ -223,26 +223,30 @@ export async function verifyJWT<T = Record<string, unknown>>(
     string,
   ];
 
-  const key = await getHmacKey(secret);
-
-  const sigPadded =
-    signatureB64 + "=".repeat((4 - (signatureB64.length % 4)) % 4);
-  const sigBase64 = sigPadded.replace(/-/g, "+").replace(/_/g, "/");
-  const sigBinary = atob(sigBase64);
-  const sigBytes = new Uint8Array(sigBinary.length);
-  for (let i = 0; i < sigBinary.length; i++) {
-    sigBytes[i] = sigBinary.charCodeAt(i);
-  }
-
-  const valid = await crypto.subtle.verify(
-    "HMAC",
-    key,
-    sigBytes,
-    new TextEncoder().encode(`${headerB64}.${payloadB64}`),
-  );
-  if (!valid) return null;
-
+  // Everything from here on parses attacker-controlled bytes, so it all sits
+  // inside the try: `atob` throws on a malformed signature segment, and an
+  // uncaught throw here surfaces as a 500 with a logged stack instead of the
+  // 401 a garbage token deserves.
   try {
+    const key = await getHmacKey(secret);
+
+    const sigPadded =
+      signatureB64 + "=".repeat((4 - (signatureB64.length % 4)) % 4);
+    const sigBase64 = sigPadded.replace(/-/g, "+").replace(/_/g, "/");
+    const sigBinary = atob(sigBase64);
+    const sigBytes = new Uint8Array(sigBinary.length);
+    for (let i = 0; i < sigBinary.length; i++) {
+      sigBytes[i] = sigBinary.charCodeAt(i);
+    }
+
+    const valid = await crypto.subtle.verify(
+      "HMAC",
+      key,
+      sigBytes,
+      new TextEncoder().encode(`${headerB64}.${payloadB64}`),
+    );
+    if (!valid) return null;
+
     const payload = JSON.parse(base64UrlDecodeToString(payloadB64)) as T & {
       exp?: number;
     };

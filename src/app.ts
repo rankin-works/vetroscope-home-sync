@@ -56,7 +56,10 @@ export async function buildApp({
         remove: true,
       },
     },
-    trustProxy: true,
+    // Off unless the operator says otherwise — see VS_TRUST_PROXY. The rate
+    // limiters key on request.ip, so trusting a forwarded header we can't
+    // verify would let a client mint a fresh bucket per request.
+    trustProxy: config.trustProxy,
     disableRequestLogging: false,
     bodyLimit: 10 * 1024 * 1024, // 10 MB — icons payloads can be chunky
   });
@@ -77,6 +80,27 @@ export async function buildApp({
       defaultJsonParser(request, body as string, done);
     },
   );
+
+  // Upgrading to a build that stopped trusting X-Forwarded-For by default is
+  // invisible from the outside: nothing errors, the rate limiters just start
+  // bucketing every client behind a proxy together. Say so once, the first
+  // time we see a forwarded header we've been told to ignore, so the fix is
+  // discoverable from the logs instead of from a mystery 429.
+  if (config.trustProxy === false) {
+    let warned = false;
+    app.addHook("onRequest", async (request) => {
+      if (warned) return;
+      if (request.headers["x-forwarded-for"] === undefined) return;
+      warned = true;
+      request.log.warn(
+        "Saw X-Forwarded-For but VS_TRUST_PROXY is off, so rate limits are " +
+          "keyed on the proxy's address and shared across all clients. If a " +
+          "reverse proxy is in front of this server, set VS_TRUST_PROXY=true " +
+          "(or to the proxy's address/CIDR). Leave it off if the server is " +
+          "reachable directly — the header is trivially spoofed.",
+      );
+    });
+  }
 
   app.decorate("db", db);
   app.decorate("config", config);
