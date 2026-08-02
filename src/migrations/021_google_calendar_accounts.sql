@@ -1,6 +1,5 @@
 -- SPDX-License-Identifier: Apache-2.0
 -- Migration 021: account-scoped Google Calendar credentials + sync leader lease.
--- Mirrors Vetroscope Cloud migration 043.
 
 CREATE TABLE IF NOT EXISTS google_calendar_accounts (
   user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,

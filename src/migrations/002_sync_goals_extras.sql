@@ -1,7 +1,8 @@
 -- SPDX-License-Identifier: Apache-2.0
--- Add the goal columns the cloud schema already had: tag_uuid (cross-device
--- reference for tag-based goals) and created_at (used by the goal detail
--- modal to scope "days met" to days after the goal existed).
+-- Add the goal columns the client sends but the server had no home for:
+-- tag_uuid (cross-device reference for tag-based goals) and created_at
+-- (used by the goal detail modal to scope "days met" to days after the
+-- goal existed).
 --
 -- The 001 schema dropped both, so until 002 lands the home-sync server
 -- silently discards them on every push and the pull SELECT can't return

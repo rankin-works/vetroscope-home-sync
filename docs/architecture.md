@@ -25,8 +25,8 @@ Time-tracking data regarding screen time and computer activity is highly sensiti
  │ └─────────────┘ │        │  └───────────────┘    │            │ └─────────────┘ │
  │                 │        │                       │            │                 │
  │ ┌─────────────┐ │        │  ┌───────────────┐    │            │ ┌─────────────┐ │
- │ │ SyncManager │ │        │  │ Node + better- │   │            │ │ SyncManager │ │
- │ │ AuthManager │ │        │  │    sqlite3     │   │            │ │ AuthManager │ │
+ │ │ Sync engine │ │        │  │ Node + better- │   │            │ │ Sync engine │ │
+ │ │ Auth/tokens │ │        │  │    sqlite3     │   │            │ │ Auth/tokens │ │
  │ │ Encryption  │ │        │  └───────────────┘    │            │ │ Encryption  │ │
  │ └─────────────┘ │        │                       │            │ └─────────────┘ │
  └─────────────────┘        │  Bind-mounted volume  │            └─────────────────┘
@@ -47,11 +47,11 @@ Docker image but never touches the data; there are no webhooks, no telemetry rou
 
 | Layer | Choice | Why |
 |-------|--------|-----|
-| Runtime | Node.js 20+ | Shares rouhly ~70% of request-handling logic with the existing Vetroscope API code. Same route shapes, same SQL, same JWT scheme. Lets us port routes with minor tweaks instead of rewriting in Go or Rust. Also keeps the maintenance burden smaller. |
-| DB | SQLite via `better-sqlite3` | Matches the local client's `node:sqlite` semantics. Single file, easy to back up, fits on any hardware. Vetroscope Cloud's SQL dialect is SQLite, so the existing schema transfers verbatim. |
+| Runtime | Node.js 20+ | Same runtime the desktop client already ships, so the sync payload types are shared vocabulary rather than a translation layer. Mature ecosystem, and one language across the project keeps the maintenance burden small. |
+| DB | SQLite via `better-sqlite3` | Matches the local client's `node:sqlite` semantics. Single file, easy to back up, fits on any hardware from a Pi to a NAS. |
 | HTTP | Fastify | Fast, low-ceremony, first-class TypeScript types. Alternative: bare Node `http` — rejected because we want structured logging + validation hooks. |
-| Auth | JWT (HS256) | Symmetric secret generated on first boot. Tokens signed by the server; validated by each request handler. Refresh tokens live in a `refresh_tokens` table (same pattern as cloud). |
-| Password hashing | PBKDF2 via WebCrypto | Identical to Vetroscope API so hashes generated on either side are interchangeable (useful for future migrations). |
+| Auth | JWT (HS256) | Symmetric secret generated on first boot. Tokens signed by the server; validated by each request handler. Refresh tokens live in a `refresh_tokens` table and rotate on every use. |
+| Password hashing | PBKDF2 via WebCrypto | Available in the standard runtime with no native dependency. The stored format is fixed by the rows already on disk — see the note in `src/lib/crypto.ts` before changing any parameter. |
 | TLS | Caddy or `node:https` with user-provided cert | Default Docker Compose file pairs the app with a Caddy sidecar for automatic Let's Encrypt. Users who only expose over LAN can either skip TLS (HTTP is fine over a trusted network) or generate a self-signed cert. |
 
 ---
@@ -65,33 +65,29 @@ vetroscope-home-sync/
 ├── docker-compose.dev.yml           # our dev + CI harness
 ├── package.json
 ├── tsconfig.json
-├── schema.sql                       # copied/adapted from api/schema.sql
 ├── src/
-│   ├── index.ts                     # Fastify bootstrap
+│   ├── index.ts                     # entry point: config → db → migrations → listen
+│   ├── app.ts                       # Fastify factory (testable without a socket)
 │   ├── env.ts                       # config / env-var loader
-│   ├── db.ts                        # better-sqlite3 setup + migrations
-│   ├── migrations/
-│   │   ├── 001_initial.sql          # copy of Vetroscope API Cloud schema
-│   │   ├── 002_app_overrides.sql
-│   │   └── 003_goal_achievements.sql
+│   ├── db.ts                        # better-sqlite3 setup
+│   ├── types.ts                     # row + sync payload shapes
+│   ├── cli/index.ts                 # vhs-cli admin surface
+│   ├── migrations/                  # forward-only, applied by filename on boot
 │   ├── routes/
-│   │   ├── auth.ts                  # register, login, refresh, logout (separate from Vetroscope API)
-│   │   ├── user.ts                  # profile, devices, encryption key
-│   │   ├── sync.ts                  # push, pull, reset
-│   │   └── admin.ts                 # first-boot bootstrap, health, stats
+│   │   ├── setup.ts                 # first-boot admin bootstrap
+│   │   ├── auth.ts                  # register, login, refresh, logout
+│   │   ├── user.ts                  # profile, devices, sync-key, account
+│   │   ├── google-calendar.ts       # credential vault + leader lease
+│   │   ├── sync.ts                  # push, pull, reset, count
+│   │   ├── admin.ts                 # invite management (role=admin)
+│   │   ├── server-info.ts           # unauthenticated descriptor
+│   │   └── health.ts                # liveness probe
 │   ├── middleware/
-│   │   ├── auth.ts                  # JWT verification
-│   │   ├── ratelimit.ts             # in-memory token bucket
-│   │   └── logging.ts
-│   └── lib/
-│       ├── crypto.ts                # shared with Vetroscope API via a published util package or copied
-│       └── migrations.ts            # applies files in /migrations on boot
+│   │   ├── auth.ts                  # JWT verification + revocation check
+│   │   └── ratelimit.ts             # in-memory token bucket
+│   └── lib/                         # crypto, migrations runner, services
 └── README.md
 ```
-
-Shared utility: we'll extract `api/src/lib/crypto.ts` into
-`shared/crypto.ts` at the repo root and symlink / publish it so Vetroscope API and Home Sync reuse the same password-hashing and token
-primitives.
 
 ---
 
@@ -103,8 +99,8 @@ vetroscope.com's user table.
 - First-boot setup is easy (one admin creates the server password during initial setup).
 - Additional devices can be added with a one-time invite code or
   the owner's email/password, user's choice.
-- Same token shape as Vetroscope Cloud clients already expect, so the
-  `AuthManager` needs minimal branching.
+- Tokens follow the shape the client already handles, so pointing it at a
+  Home Sync target needs no special-casing in its auth flow.
 
 ### First-boot bootstrap
 
@@ -138,33 +134,49 @@ tables all scope by `user_id` in the database.
 
 ## Data Schema
 
-Identical to Vetroscope Cloud. Same tables, same columns,
-same natural keys — the point is that a client can push the same
-payload to either endpoint and the server-side handling is the same.
+Column names and types follow the sync payload the desktop client puts on
+the wire, so a client pointed at a Home Sync target serializes exactly what
+it would for any other target. That wire compatibility is the contract;
+everything about how this server stores and processes those documents is
+its own concern.
 
-**Tables to copy from `api/schema.sql`:**
-- `users`
-- `devices`
-- `refresh_tokens`
+**Account and session tables:**
+- `users` — credentials, plan, role, wrapped sync keys, `token_version`
+- `devices` — one row per linked device, capped by `VS_MAX_DEVICES_PER_USER`
+- `refresh_tokens` — rotated on every use
+- `invites`, `password_resets`
+
+**Replicated tables**, all keyed by a client-generated natural key and
+scoped by `user_id`:
 - `sync_entries`, `sync_tags`, `sync_goals`, `sync_markers`,
-  `sync_goal_achievements` (all 5 sync tables verbatim)
-- `sync_icons`, `sync_overrides` (optional for Home Sync users, but
-  keeping them means full parity with Vetroscope Cloud)
-- `sync_settings`
+  `sync_goal_achievements`
+- `sync_icons`, `sync_overrides`, `sync_settings`
+- `sync_tag_sticky_exclusions`, `sync_tag_sticky_project_apps`,
+  `sync_tag_sticky_subproject_scopes`
+- `sync_media_links`, `sync_reminders`, `sync_reminder_events`,
+  `sync_reminder_claims`, `sync_entry_dismissals`
 
-**New table specific to Home Sync:**
+**Server-local tables** (never replicated):
 ```sql
 CREATE TABLE IF NOT EXISTS server_state (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
 );
--- Rows: setup_token_hash, jwt_secret, server_version, created_at
+-- Rows: jwt_secret, setup_token_hash, setup_token_salt,
+--       installation_id, created_at, setup_completed_at
 ```
 
-**Encryption:** Clients continue to encrypt fields client-side with the
-user's recovery code before push. The home server only sees encrypted
-blobs, same as the Vetroscope Cloud. This means even a compromised Home Sync
-instance can't read the data.
+**Tenant scoping.** Rows keyed on a bare `uuid` share one key space across
+every account on the server, so each push upsert additionally requires the
+existing row to belong to the authenticated user before it will update it.
+A uuid that collides across accounts is dropped, not applied. Any new
+replicated table inherits this requirement — see
+`src/__tests__/tenant-isolation.test.ts`, which carries one case per
+uuid-keyed table so an omission shows up as a missing case.
+
+**Encryption:** Clients encrypt sensitive fields client-side before push,
+so the server only ever holds ciphertext for them. A compromised server —
+or a stolen `sync.db` — doesn't yield readable activity data.
 
 ---
 
@@ -209,32 +221,22 @@ Sync
 **Switch behavior:**
 Both Vetroscope Cloud and Home Sync can be active simultaneously.
 
-### SyncManager changes
+### What the client needs from a target
 
-Currently `electron/sync.ts` has a hard-coded `API_BASE`. We parameterize:
+A Home Sync target is just a base URL the client is configured with. Every
+request path below hangs off it, and the request and response bodies are
+the ones documented in `src/types.ts`:
 
-```ts
-const API_BASE = getSyncEndpoint(); // reads from settings
-// "https://api.vetroscope.com"  — cloud
-// "http://vetroscope.home.local:4437"  — home sync
-```
+- `GET /health` and `GET /server-info` — reachability and capability check
+  before any credentials are entered.
+- `POST /setup` or `POST /auth/register` / `POST /auth/login` — account
+  bootstrap or sign-in, returning an access + refresh token pair.
+- `POST /auth/refresh` — token rotation on the same base URL.
+- `POST /sync/push` and `POST /sync/pull` — the replication loop.
 
-Everywhere the SyncManager calls `fetch(`${API_BASE}/sync/push`, ...)`
-it already points at the configured endpoint. The request/response
-shapes are identical between cloud and home, so no conditional logic
-needed beyond the base URL.
-
-### AuthManager changes
-
-Similar parameterization — token refresh calls use the same
-`${API_BASE}/auth/refresh` path regardless of target. The stored
-`user_plan` field gets `"home"` for home-sync users, which we map to
-licensed-tier UI treatments (e.g. no upgrade prompts, no Pro-only
-feature grayouts).
-
-**Licensing gate:** before enabling Home Sync, the client checks
-`licenseState.status === "active" || licenseState.status === "pro"`.
-Trial users are unable to access settings.
+Accounts on this server report `plan: "home"`, which the client maps to
+licensed-tier treatment. Home Sync is available on the Licensed tier and
+above; the client gates the feature before offering the setup flow.
 
 ### Connection wizard
 
@@ -249,9 +251,10 @@ ship a wizard:
    exists yet. If not, we show the setup-token prompt ("Paste the code
    from your server logs"). If yes, we show the standard email/password
    sign-in.
-3. **Device registration** — same device-id mechanics as cloud.
-4. **Encryption setup** — identical to Vetroscope Cloud's encryption flow
-   (recovery code → wrapped sync key → stored in `/user/sync-key`).
+3. **Device registration** — the client registers a device id and name,
+   subject to `VS_MAX_DEVICES_PER_USER`.
+4. **Encryption setup** — recovery code → wrapped sync key → stored via
+   `/user/sync-key`. The server sees only the wrap.
 5. **Initial pull** — kicks off a full pull to populate the local DB
    if this is a fresh device.
 
@@ -346,11 +349,19 @@ In order of severity:
    non-sensitive fields like `is_adobe`, `timestamp`, UUIDs are in
    plaintext).
 3. **Insider (household member, roommate)** — has a second user account
-   on the same server. Mitigation: strict `user_id` scoping on every
-   query (enforced by tests). Invite tokens are single-use and have a
-   24h TTL.
-4. **Attacker who steals a refresh token** — Mitigation: tokens rotate
-   on each refresh, old tokens are blacklisted server-side.
+   on the same server. Mitigation: every pull query filters on `user_id`,
+   and every push upsert additionally requires the row it would update to
+   already belong to the caller — a uuid that collides across accounts is
+   dropped rather than applied. Covered by
+   `src/__tests__/tenant-isolation.test.ts`, one case per uuid-keyed
+   table. Invite tokens are single-use with a 24h TTL.
+4. **Attacker who steals a refresh token** — Mitigation: tokens rotate on
+   each refresh and the consumed row is deleted, so a replayed token is
+   rejected.
+5. **Attacker who steals an access token** — Mitigation: 1h expiry, and a
+   password change bumps `users.token_version`, which invalidates every
+   outstanding access token for that account on its next request rather
+   than waiting for expiry.
 
 ### TLS handling
 
@@ -414,37 +425,36 @@ manifest. Preserves uuids, so devices keep syncing without re-auth.
 ## Licensing Gate
 
 Home Sync is unlocked when the client's license status is **active
-(licensed)** or **pro**. Explicit carve-out from the Pro-only gate on
-cloud features:
+(licensed)** or **pro** — it is not a Pro-only feature. The server itself
+enforces nothing here: every account it holds is `plan: "home"`, and the
+gate lives in the client before it offers the setup flow.
 
-```ts
-const canUseHomeSync =
-  licenseState.status === "active" ||   // licensed lifetime
-  licenseState.status === "pro";         // paying subscriber
-```
 ---
 
 ## Encryption
 
-Unchanged from cloud. The client:
+The server never holds a key that can read a user's activity data. The
+client:
 1. Generates a random 32-byte encryption key on first enable.
 2. Wraps it with a key derived from the user's recovery code (12-word
    BIP-39 phrase).
-3. Pushes the wrapped key to `/user/sync-key` — server stores the
-   ciphertext, never sees the plaintext key.
-4. Every push encrypts `app_name`, `window_title`, `project`, marker
-   labels, override display names, and sync_settings values before
-   transmission.
+3. Pushes the wrapped key to `/user/sync-key` — the server stores the
+   ciphertext and never sees the plaintext key.
+4. Encrypts `app_name`, `window_title`, `project`, marker labels,
+   override display names, and `sync_settings` values on every push.
+
+Optionally, a user can instead store a server-held wrap for sign-in
+recovery (`/user/sync-key/server`), trading some of that guarantee for the
+ability to recover the key by signing in. That wrap is sealed with
+`VS_SYNC_DEK_KEK` when configured — see the environment variable table.
 
 **Why still encrypt when the server is yours?** Defense in depth:
-- If the server is compromised, data is still unreadable without the
-  recovery code.
-- If the user exposes the server to the internet and someone exploits
-  a future bug, the DB is still encrypted at rest (functionally).
-- Same code paths as cloud — less branching means fewer bugs.
-
-The client treats Home Sync exactly like Cloud from an encryption
-standpoint; no UI changes.
+- A compromised server, or a stolen `sync.db`, is still unreadable
+  without the recovery code.
+- If the server is exposed to the internet and a future bug is found,
+  the data at rest doesn't come with it.
+- On a multi-user server, one account's operator-level access to the host
+  doesn't become access to another account's activity.
 
 ---
   who want that are already running their own proxy layer.

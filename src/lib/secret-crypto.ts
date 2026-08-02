@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// AES-256-GCM helpers for server-managed secrets (Google Calendar vault).
-// Format matches the cloud Worker: `iv_b64:ciphertext_b64`.
+// AES-256-GCM helpers for server-managed secrets (Google Calendar vault,
+// sync-key server wraps). Wire format: `iv_b64:ciphertext_b64`, optionally
+// prefixed with a version tag — see below.
 
 import {
   createCipheriv,

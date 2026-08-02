@@ -5,9 +5,8 @@
 -- on /sync/push and /sync/pull lives next door) and admin tooling can
 -- answer "what version is this device on?" without round-tripping.
 --
--- Plaintext (non-PII; admins need to read it). Mirrors the Cloud
--- Worker's 014_devices_app_version migration so the device-row shape
--- stays compatible across the two backends.
+-- Plaintext (non-PII; admins need to read it). The column is part of the
+-- device-row shape the client expects, so it stays stable on the wire.
 --
 -- Existing rows backfill to NULL — clients send the version on every
 -- token-issuing request, so the column populates on its own as devices

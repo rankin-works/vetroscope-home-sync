@@ -1,9 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // SQLite database bootstrap. `better-sqlite3` is synchronous — the
-// trade-off vs the cloud Worker's async D1 binding is that every handler
-// calls into db.prepare(...).run()/get()/all() directly, without awaits,
-// and concurrency is serialized by the single writer. WAL mode lets
+// handlers call into db.prepare(...).run()/get()/all() directly, without
+// awaits, and concurrency is serialized by the single writer. WAL mode lets
 // readers proceed alongside a writer, which is enough headroom for a
 // home-scale deployment (architecture §Concurrent client bug surface).
 

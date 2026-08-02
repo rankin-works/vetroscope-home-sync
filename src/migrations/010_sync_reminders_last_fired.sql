@@ -9,7 +9,6 @@
 -- offline, the user gets a stacked overlay queue the moment B comes
 -- back online.
 --
--- Mirrors Vetroscope Cloud migration 022 from the private repo.
 -- ISO timestamp set client-side by the scheduler at fire time;
 -- nullable so reminders that have never fired stay represented as
 -- NULL. No new index — push/pull join on uuid like every other

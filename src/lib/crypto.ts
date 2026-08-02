@@ -2,11 +2,11 @@
 //
 // Password hashing (PBKDF2), HS256 JWT, and token helpers.
 //
-// Hash format and JWT shape are deliberately identical to the Vetroscope
-// Cloud Worker's crypto module so credentials produced on either side
-// verify against the other. If you change iterations, salt length, or
-// JWT alg here, change them in both places — otherwise future migrations
-// between Cloud and Home Sync will break.
+// The hash encoding is a stored format: `password_hash` rows on disk were
+// produced by these exact parameters, and there is no rehash-on-login path
+// yet. Changing PBKDF2_ITERATIONS, SALT_LENGTH, or the digest without one
+// makes every existing password unverifiable — locking every user out with
+// no recovery short of an admin reset. Add the migration path first.
 
 const PBKDF2_ITERATIONS = 100_000;
 const SALT_LENGTH = 32;

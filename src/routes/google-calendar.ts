@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // Account-scoped Google Calendar credential vault + sync leader lease.
-// Shape matches Vetroscope Cloud /user/google-calendar-* routes.
+// Refresh tokens are sealed with AES-256-GCM before they touch the DB;
+// the leader lease keeps multiple devices on one account from running the
+// calendar sync loop simultaneously.
 
 import type { FastifyPluginAsync } from "fastify";
 

@@ -1,14 +1,15 @@
 -- SPDX-License-Identifier: Apache-2.0
 -- Initial Home Sync schema.
 --
--- Mirrors the Vetroscope Cloud D1 schema minus billing-related columns and
--- tables. A client can push identical payloads at either endpoint; the
--- server-side shape is the same.
+-- Column names and types follow the sync payload the desktop client sends,
+-- so a client configured against this server pushes the same documents it
+-- would to any other Vetroscope sync target. That wire compatibility is the
+-- contract; how the server stores and processes it is this project's own.
 
 -- Users. `plan` is pinned to 'home' for Home Sync accounts — clients map
--- this to licensed-tier UI treatments. Billing fields from the cloud schema
--- (ls_customer_id, ls_subscription_id, license_key) are intentionally
--- absent: Home Sync has no billing plumbing.
+-- this to licensed-tier UI treatments. There are no billing or subscription
+-- columns: Home Sync has no billing plumbing and never talks to a payment
+-- processor.
 CREATE TABLE IF NOT EXISTS users (
   id TEXT PRIMARY KEY,                        -- UUID
   email TEXT NOT NULL UNIQUE,
@@ -47,7 +48,8 @@ CREATE INDEX IF NOT EXISTS idx_refresh_tokens_user ON refresh_tokens(user_id);
 CREATE INDEX IF NOT EXISTS idx_refresh_tokens_hash ON refresh_tokens(token_hash);
 
 -- Password reset tokens. Home Sync has no SMTP; resets are driven by the
--- admin-CLI in the container. Table is kept so the shape matches cloud.
+-- admin-CLI in the container. The table is kept so the reset flow has a
+-- place to land if SMTP is ever added.
 CREATE TABLE IF NOT EXISTS password_resets (
   id TEXT PRIMARY KEY,
   user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,

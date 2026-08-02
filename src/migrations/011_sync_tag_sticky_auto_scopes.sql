@@ -1,15 +1,16 @@
 -- SPDX-License-Identifier: Apache-2.0
--- Catch Home Sync up with Vetroscope Cloud migrations 027–029.
+-- Opt-in per-tag auto-tagging scopes for new breakdowns and
+-- sub-breakdowns, plus the per-scope allowlists that gate them.
 --
---   027 — sync_tags.sticky_subprojects
+--   * sync_tags.sticky_subprojects
 --         Opt-in per-tag flag: when sticky is on, new sub-breakdowns under
 --         a tagged breakdown can inherit the tag (songs, videos, etc.).
 --
---   028 — sync_tags.sticky_projects
+--   * sync_tags.sticky_projects
 --         Opt-in per-tag flag: when sticky is on and the tag is on the
 --         whole app, new breakdowns under that app can inherit the tag.
 --
---   029 — sync_tag_sticky_project_apps
+--   * sync_tag_sticky_project_apps
 --         sync_tag_sticky_subproject_scopes
 --         Per-app / per-breakdown allowlists gating the two global flags
 --         above so auto-tag only applies where the user opted in.

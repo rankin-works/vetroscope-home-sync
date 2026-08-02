@@ -2,8 +2,9 @@
 //
 // /auth/* — register, login, refresh, logout.
 //
-// Shapes mirror the Vetroscope Cloud Worker's /auth endpoints so the
-// client code path is shared. Home Sync only pins are:
+// Home Sync owns its own accounts — it has no knowledge of any other
+// Vetroscope account system, and credentials here are separate. Notable
+// properties:
 //   - `plan` is always "home" (no trial → licensed → pro progression)
 //   - `role` rides on the JWT so /admin/* routes can gate on it
 //   - registration is env-gated: open / invite / closed

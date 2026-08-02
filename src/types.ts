@@ -1,9 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// Shared row + payload shapes. These are the request/response types the
-// client already sends to Vetroscope Cloud — we keep them 1:1 on the
-// Home Sync side so a client can flip API_BASE between cloud and home
-// without any serialization branching.
+// Shared row + payload shapes.
+//
+// These mirror the documents the Vetroscope desktop client puts on the
+// wire. That shape is the compatibility contract for this server: a client
+// pointed at a Home Sync target serializes exactly what it would for any
+// other target, with no branching. Changing a field here changes what
+// clients in the wild can talk to, so additions should stay optional.
 
 export type Plan = "home";
 export type Role = "admin" | "user";
@@ -116,10 +119,10 @@ export interface SyncTag {
   color: string;
   sticky: number;
   /** Opt-in: auto-tag new sub-breakdowns under tagged breakdowns.
-   *  Added in 011 (Cloud 027). Pre-011 servers drop on push. */
+   *  Added in 011. Pre-011 servers drop it on push. */
   sticky_subprojects?: number;
   /** Opt-in: auto-tag new breakdowns under tagged apps.
-   *  Added in 011 (Cloud 028). Pre-011 servers drop on push. */
+   *  Added in 011. Pre-011 servers drop it on push. */
   sticky_projects?: number;
   // Optional user-uploaded tag icon (encrypted data URL). Added in 005.
   // Pre-005 servers don't surface it on pull.
@@ -131,8 +134,7 @@ export interface SyncTag {
   deleted: number;
   // Archived tags stay attached to past entries client-side but are
   // hidden from default tag pickers and refuse new assignments.
-  // Optional on the wire — pre-008 servers drop it. Added in
-  // migration 008 (Home Sync) / 022 (Cloud).
+  // Optional on the wire — pre-008 servers drop it. Added in migration 008.
   archived?: number;
   updated_at: string;
 }
@@ -331,9 +333,10 @@ export interface PushPayload {
   entry_dismissals?: SyncEntryDismissal[];
 }
 
-// Compound cursor for tables where rows commonly share an `updated_at`
-// (icons, settings — see icon-sync-fix-plan in the private repo). The
-// secondary key is the row's natural unique key and acts as a tiebreaker
+// Compound cursor for tables where rows commonly share an `updated_at` —
+// icons and settings especially, since one bulk push stamps the whole
+// batch with the same millisecond. The secondary key is the row's natural
+// unique key and acts as a tiebreaker
 // at a timestamp boundary so strict-greater-than pagination doesn't drop
 // rows that share the boundary timestamp. Optional in payloads so older
 // clients (without compound-cursor awareness) still work — pre-fix

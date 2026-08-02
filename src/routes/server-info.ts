@@ -13,9 +13,9 @@ import { VERSION } from "../version.js";
 // Minimum Vetroscope desktop-app version this server will accept on
 // /sync/push and /sync/pull. Bump when shipping a server change that
 // depends on a newer client payload shape (e.g. when sync_tags gained
-// parent_uuid in beta.9 the client started sending it; pre-0.2.36
-// clients still work but don't populate sticky auto-tag fields or
-// the per-scope allowlists added in beta.16 (Cloud 027–029).
+// parent_uuid in beta.9 the client started sending it; pre-0.2.36 clients
+// still work but don't populate the sticky auto-tag fields or per-scope
+// allowlists added in beta.16).
 // Exposed on /server-info so clients can pre-check before pushing.
 const MIN_CLIENT_VERSION = "0.2.36";
 

@@ -2,17 +2,20 @@
 //
 // /sync/* — push, pull, reset.
 //
-// Port of the Cloud Worker's /sync endpoints to better-sqlite3. The
-// SQL is byte-identical to the cloud side on purpose: LWW semantics,
-// natural keys, and the override-full-table-on-pull quirk all carry
-// over, so a client pushing to Home Sync and then to Cloud gets the
-// same convergence guarantees.
+// Convergence rules, which the client depends on:
+//   - Last write wins, compared on the row's `updated_at`. A push whose
+//     timestamp isn't strictly newer is dropped, so replaying an old
+//     batch can't resurrect stale values.
+//   - Rows are addressed by their natural key (a client-generated uuid,
+//     or a composite for the hash-keyed tables), never by a server id —
+//     that's what lets two devices that have never met agree on a row.
+//   - Every push upsert is scoped to the authenticated user, so a uuid
+//     that collides across accounts is dropped rather than applied.
+//   - Overrides are returned in full on every pull rather than filtered
+//     by cursor; the set is small and the client de-dupes on LWW.
 //
-// Notable port differences:
-//   - env.DB.batch(...)    → one synchronous db.transaction(() => { ... })
-//   - async .bind().run()  → db.prepare(sql).run(...args) with no await
-//   - The "requirePro" gate doesn't exist here — everyone on a Home
-//     Sync server is effectively plan=home, which is licensed-equivalent.
+// There is no plan gate: every account on a Home Sync server is plan=home,
+// which the client treats as licensed-equivalent.
 
 import type { FastifyPluginAsync } from "fastify";
 import type Database from "better-sqlite3";
@@ -53,9 +56,9 @@ const SETTING_LIMIT = 100;
 
 // Allowlist of sync-eligible setting keys. The client has historically
 // attempted to push additional keys; rejecting unknown ones keeps the
-// server-side schema stable and the payload bounded. Mirrors the client
-// allowlist (electron/settings.ts) and the cloud API — a key missing here is
-// silently rejected on push even when the client sends it.
+// server-side schema stable and the payload bounded. A key missing here is
+// silently rejected on push even when the client sends it, so this set has
+// to grow before a new synced setting will replicate.
 const SYNCED_SETTING_KEYS = new Set([
   "ignored_apps",
   "ignored_projects",
@@ -864,8 +867,10 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
           )
           .all(userId, cursor);
 
-    // Overrides are intentionally returned in full (not cursor-filtered)
-    // — see the cloud Worker comment, the client relies on LWW to dedupe.
+    // Overrides are intentionally returned in full rather than cursor-
+    // filtered: the set is bounded by OVERRIDE_PULL_LIMIT and the client
+    // de-dupes on LWW, so a full list costs little and avoids the
+    // shared-timestamp pagination hazard the other tables need cursors for.
     const overrides = fastify.db
       .prepare<[string], SyncOverride>(
         `SELECT name_hash, app_name, display_name, color, icon_data_url, updated_at

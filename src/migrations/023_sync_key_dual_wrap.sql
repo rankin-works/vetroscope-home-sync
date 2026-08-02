@@ -1,4 +1,5 @@
--- Dual-wrap sync encryption (parity with Cloud migration 045).
+-- Dual-wrap sync encryption: a server-held wrap for sign-in recovery
+-- alongside the recovery-code wrap for end-to-end mode.
 -- Existing recovery-code wraps stay in e2ee mode.
 
 ALTER TABLE users ADD COLUMN sync_key_server_wrap TEXT;

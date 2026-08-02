@@ -2,7 +2,6 @@
 -- uuid is the entries.uuid that was dismissed. deleted=1 means the user
 -- undid the dismissal (restore) so other devices should stop suppressing
 -- that entry and can re-pull it when the undoing device re-pushes it.
--- Mirrors cloud migration 032.
 CREATE TABLE IF NOT EXISTS sync_entry_dismissals (
   uuid TEXT PRIMARY KEY,
   user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,

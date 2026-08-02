@@ -528,7 +528,7 @@ describe("/sync", () => {
   });
 
   it("tag push round-trips sticky_subprojects and sticky_projects", async () => {
-    // 011 added both columns (Cloud 027 + 028). Before 011 they were
+    // 011 added both columns. Before 011 they were
     // silently dropped on push and never returned on pull.
     const admin = await bootstrapAdmin(h);
     const tag = {

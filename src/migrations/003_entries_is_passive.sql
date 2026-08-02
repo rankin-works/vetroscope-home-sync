@@ -1,8 +1,7 @@
 -- SPDX-License-Identifier: Apache-2.0
 -- Add is_passive to sync_entries so away-listening / background-app
 -- entries (music playing while another app is focused, idle-but-not-
--- away samples, etc.) can be excluded from active-time totals. Mirrors
--- the cloud schema's migration 004_entries_is_passive.sql.
+-- away samples, etc.) can be excluded from active-time totals.
 --
 -- Until this migration ran, the desktop client was pushing is_passive
 -- on every entry but the server was silently discarding it (the column

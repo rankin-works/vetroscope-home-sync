@@ -1,10 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // /user/* — profile, password change, device unlink, sync-key
-// storage, account deletion. Mirrors the cloud Worker's /user/* shapes
-// so the client is agnostic to which backend it's talking to. The
-// `has_subscription` field is retained for shape-compat and pinned
-// to false on Home Sync.
+// storage, account deletion. The `has_subscription` field is part of the
+// profile shape the client reads and is pinned to false — Home Sync has no
+// billing plumbing.
 
 import type { FastifyPluginAsync } from "fastify";
 
