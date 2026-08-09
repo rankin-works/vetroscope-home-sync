@@ -149,7 +149,7 @@ its own concern.
 **Replicated tables**, all keyed by a client-generated natural key and
 scoped by `user_id`:
 - `sync_entries`, `sync_tags`, `sync_goals`, `sync_markers`,
-  `sync_goal_achievements`
+  `sync_notes`, `sync_note_folders`, `sync_goal_achievements`
 - `sync_icons`, `sync_overrides`, `sync_settings`
 - `sync_tag_sticky_exclusions`, `sync_tag_sticky_project_apps`,
   `sync_tag_sticky_subproject_scopes`

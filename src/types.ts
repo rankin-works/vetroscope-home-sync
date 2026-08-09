@@ -282,9 +282,23 @@ export interface SyncNote {
   uuid: string;
   title: string;
   body: string;
-  timestamp: string;
+  /** Null = timeless note (no date/time). Nullable since 028. */
+  timestamp: string | null;
   end_timestamp: string | null;
   marker_uuid: string | null;
+  /** At most one folder, or null if unfiled. Added in 028. */
+  folder_uuid?: string | null;
+  /** 0/1 pin flag. Added in 028. */
+  pinned?: number;
+  deleted: number;
+  updated_at: string;
+}
+
+/** Nested note folders. name encrypted; hierarchy cleartext. Added in 028. */
+export interface SyncNoteFolder {
+  uuid: string;
+  name: string;
+  parent_uuid: string | null;
   deleted: number;
   updated_at: string;
 }
@@ -330,8 +344,10 @@ export interface PushPayload {
   goals?: SyncGoal[];
   markers?: SyncMarker[];
   // User-authored notes. Added in 027. Pre-027 servers silently drop
-  // this collection.
+  // this collection. folder_uuid / pinned / nullable timestamp in 028.
   notes?: SyncNote[];
+  // Nested note folders. Added in 028. Pre-028 servers silently drop.
+  note_folders?: SyncNoteFolder[];
   achievements?: SyncGoalAchievement[];
   icons?: SyncIcon[];
   overrides?: SyncOverride[];
@@ -401,6 +417,11 @@ export interface PullPayload {
   reminder_event_cursor?: CompoundCursor | null;
   // Dispute-time-block tombstones. Added in 012.
   entry_dismissal_cursor?: CompoundCursor | null;
+  // Notes compound cursor. Added alongside richer note pagination;
+  // pre-028 clients omit and fall back to the shared time cursor.
+  note_cursor?: CompoundCursor | null;
+  // Note folders. Added in 028.
+  note_folder_cursor?: CompoundCursor | null;
 }
 
 export interface PullResponse {
@@ -411,6 +432,8 @@ export interface PullResponse {
   // User-authored notes. Empty when the server predates 027 or when
   // the user has no notes. Added in 027.
   notes?: SyncNote[];
+  // Nested note folders. Empty when the server predates 028. Added in 028.
+  note_folders?: SyncNoteFolder[];
   achievements: SyncGoalAchievement[];
   icons: SyncIcon[];
   overrides: SyncOverride[];
@@ -454,4 +477,7 @@ export interface PullResponse {
   reminder_event_cursor?: CompoundCursor;
   // Added in 012 alongside the sync_entry_dismissals table.
   entry_dismissal_cursor?: CompoundCursor;
+  // Notes / note folders compound cursors (028-aware clients).
+  note_cursor?: CompoundCursor;
+  note_folder_cursor?: CompoundCursor;
 }

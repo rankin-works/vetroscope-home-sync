@@ -31,6 +31,7 @@ import type {
   SyncIcon,
   SyncMarker,
   SyncNote,
+  SyncNoteFolder,
   SyncOverride,
   SyncSetting,
   SyncTag,
@@ -265,25 +266,48 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
         string,
         string,
         string,
-        string,
         string | null,
         string | null,
+        string | null,
+        string | null,
+        number,
         number,
         string,
       ]
     >(
-      `INSERT INTO sync_notes (uuid, user_id, title, body, timestamp, end_timestamp, marker_uuid, deleted, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO sync_notes (
+         uuid, user_id, title, body, timestamp, end_timestamp,
+         marker_uuid, folder_uuid, pinned, deleted, updated_at
+       )
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(uuid) DO UPDATE SET
          title = excluded.title,
          body = excluded.body,
          timestamp = excluded.timestamp,
          end_timestamp = excluded.end_timestamp,
          marker_uuid = excluded.marker_uuid,
+         folder_uuid = excluded.folder_uuid,
+         pinned = excluded.pinned,
          deleted = excluded.deleted,
          updated_at = excluded.updated_at
        WHERE sync_notes.user_id = excluded.user_id
          AND excluded.updated_at > sync_notes.updated_at`,
+    );
+
+    const upsertNoteFolder = stmts.prepare<
+      [string, string, string, string | null, number, string]
+    >(
+      `INSERT INTO sync_note_folders (
+         uuid, user_id, name, parent_uuid, deleted, updated_at
+       )
+       VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT(uuid) DO UPDATE SET
+         name = excluded.name,
+         parent_uuid = excluded.parent_uuid,
+         deleted = excluded.deleted,
+         updated_at = excluded.updated_at
+       WHERE sync_note_folders.user_id = excluded.user_id
+         AND excluded.updated_at > sync_note_folders.updated_at`,
     );
 
     const upsertAchievement = stmts.prepare<
@@ -642,11 +666,23 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
           userId,
           n.title,
           n.body,
-          n.timestamp,
+          n.timestamp ?? null,
           n.end_timestamp ?? null,
           n.marker_uuid ?? null,
+          n.folder_uuid ?? null,
+          n.pinned ?? 0,
           n.deleted,
           n.updated_at || now,
+        );
+      }
+      for (const f of (body.note_folders ?? []).slice(0, BATCH_SIZE)) {
+        upsertNoteFolder.run(
+          f.uuid,
+          userId,
+          f.name,
+          f.parent_uuid ?? null,
+          f.deleted,
+          f.updated_at || now,
         );
       }
       for (const a of (body.achievements ?? []).slice(0, BATCH_SIZE)) {
@@ -807,6 +843,8 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
         tags: body.tags?.length ?? 0,
         goals: body.goals?.length ?? 0,
         markers: body.markers?.length ?? 0,
+        notes: body.notes?.length ?? 0,
+        note_folders: body.note_folders?.length ?? 0,
         achievements: body.achievements?.length ?? 0,
       },
       cursor: now,
@@ -861,15 +899,69 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
       )
       .all(userId, cursor, BATCH_SIZE);
 
-    const notes = fastify.db
-      .prepare<[string, string, number], SyncNote>(
-        `SELECT uuid, title, body, timestamp, end_timestamp, marker_uuid, deleted, updated_at
-         FROM sync_notes
-         WHERE user_id = ? AND updated_at > ?
-         ORDER BY updated_at ASC
-         LIMIT ?`,
-      )
-      .all(userId, cursor, BATCH_SIZE);
+    const notes = (() => {
+      const noteCursor = body.note_cursor;
+      if (noteCursor) {
+        return fastify.db
+          .prepare<[string, string, string, string, number], SyncNote>(
+            `SELECT uuid, title, body, timestamp, end_timestamp, marker_uuid,
+                    folder_uuid, pinned, deleted, updated_at
+               FROM sync_notes
+              WHERE user_id = ?
+                AND (updated_at > ? OR (updated_at = ? AND uuid > ?))
+              ORDER BY updated_at ASC, uuid ASC
+              LIMIT ?`,
+          )
+          .all(
+            userId,
+            noteCursor.updated_at,
+            noteCursor.updated_at,
+            noteCursor.key,
+            BATCH_SIZE,
+          );
+      }
+      return fastify.db
+        .prepare<[string, string, number], SyncNote>(
+          `SELECT uuid, title, body, timestamp, end_timestamp, marker_uuid,
+                  folder_uuid, pinned, deleted, updated_at
+             FROM sync_notes
+            WHERE user_id = ? AND updated_at > ?
+            ORDER BY updated_at ASC, uuid ASC
+            LIMIT ?`,
+        )
+        .all(userId, cursor, BATCH_SIZE);
+    })();
+
+    const noteFolders = (() => {
+      const noteFolderCursor = body.note_folder_cursor;
+      if (noteFolderCursor) {
+        return fastify.db
+          .prepare<[string, string, string, string, number], SyncNoteFolder>(
+            `SELECT uuid, name, parent_uuid, deleted, updated_at
+               FROM sync_note_folders
+              WHERE user_id = ?
+                AND (updated_at > ? OR (updated_at = ? AND uuid > ?))
+              ORDER BY updated_at ASC, uuid ASC
+              LIMIT ?`,
+          )
+          .all(
+            userId,
+            noteFolderCursor.updated_at,
+            noteFolderCursor.updated_at,
+            noteFolderCursor.key,
+            BATCH_SIZE,
+          );
+      }
+      return fastify.db
+        .prepare<[string, string, number], SyncNoteFolder>(
+          `SELECT uuid, name, parent_uuid, deleted, updated_at
+             FROM sync_note_folders
+            WHERE user_id = ? AND updated_at > ?
+            ORDER BY updated_at ASC, uuid ASC
+            LIMIT ?`,
+        )
+        .all(userId, cursor, BATCH_SIZE);
+    })();
 
     const achievements = fastify.db
       .prepare<[string, string, number], SyncGoalAchievement>(
@@ -1210,16 +1302,15 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
       >("UPDATE devices SET last_sync_at = ? WHERE id = ? AND user_id = ?")
       .run(now, auth.device_id, userId);
 
-    // Time-cursor types: entries, tags, goals, markers, notes, achievements.
-    // Icons + settings + tag_sticky_exclusions are governed by their own
-    // compound cursors and tracked separately so the time cursor doesn't
-    // have to lie about their state.
+    // Time-cursor types: entries, tags, goals, markers, achievements.
+    // Notes + note folders use compound cursors (like reminders) so a
+    // clustered push doesn't lose rows past the first page. Icons /
+    // settings / sticky tables share the same compound pattern.
     const hitLimitTimeTypes =
       entries.length >= BATCH_SIZE ||
       tags.length >= BATCH_SIZE ||
       goals.length >= BATCH_SIZE ||
       markers.length >= BATCH_SIZE ||
-      notes.length >= BATCH_SIZE ||
       achievements.length >= BATCH_SIZE;
     const hitLimitIcons = icons.length >= ICON_LIMIT;
     const hitLimitSettings = settings.length >= SETTING_LIMIT;
@@ -1230,10 +1321,12 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
     const hitLimitReminders = reminders.length >= BATCH_SIZE;
     const hitLimitReminderEvents = reminderEvents.length >= BATCH_SIZE;
     const hitLimitEntryDismissals = entryDismissals.length >= BATCH_SIZE;
+    const hitLimitNotes = notes.length >= BATCH_SIZE;
+    const hitLimitNoteFolders = noteFolders.length >= BATCH_SIZE;
 
     let newCursor = now;
     if (hitLimitTimeTypes) {
-      const latestPerType = [entries, tags, goals, markers, notes, achievements]
+      const latestPerType = [entries, tags, goals, markers, achievements]
         .filter((arr) => arr.length > 0)
         .map(
           (arr) =>
@@ -1316,6 +1409,20 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
             key: entryDismissals[entryDismissals.length - 1]!.uuid,
           }
         : undefined;
+    const nextNoteCursor =
+      hitLimitNotes && notes.length > 0
+        ? {
+            updated_at: notes[notes.length - 1]!.updated_at,
+            key: notes[notes.length - 1]!.uuid,
+          }
+        : undefined;
+    const nextNoteFolderCursor =
+      hitLimitNoteFolders && noteFolders.length > 0
+        ? {
+            updated_at: noteFolders[noteFolders.length - 1]!.updated_at,
+            key: noteFolders[noteFolders.length - 1]!.uuid,
+          }
+        : undefined;
 
     const response: PullResponse = {
       entries,
@@ -1323,6 +1430,7 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
       goals,
       markers,
       notes,
+      note_folders: noteFolders,
       achievements,
       icons,
       overrides,
@@ -1345,7 +1453,9 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
         hitLimitMediaLinks ||
         hitLimitReminders ||
         hitLimitReminderEvents ||
-        hitLimitEntryDismissals,
+        hitLimitEntryDismissals ||
+        hitLimitNotes ||
+        hitLimitNoteFolders,
       ...(nextIconCursor ? { icon_cursor: nextIconCursor } : {}),
       ...(nextSettingCursor ? { setting_cursor: nextSettingCursor } : {}),
       ...(nextTseCursor ? { tag_sticky_exclusion_cursor: nextTseCursor } : {}),
@@ -1364,6 +1474,10 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
         : {}),
       ...(nextEntryDismissalCursor
         ? { entry_dismissal_cursor: nextEntryDismissalCursor }
+        : {}),
+      ...(nextNoteCursor ? { note_cursor: nextNoteCursor } : {}),
+      ...(nextNoteFolderCursor
+        ? { note_folder_cursor: nextNoteFolderCursor }
         : {}),
     };
     return reply.send(response);
@@ -1435,6 +1549,7 @@ export function wipeUserSyncRows(db: Database.Database, userId: string): void {
     "sync_goals",
     "sync_markers",
     "sync_notes",
+    "sync_note_folders",
     "sync_goal_achievements",
     "sync_icons",
     "sync_overrides",
