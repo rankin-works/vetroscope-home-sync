@@ -117,6 +117,23 @@ const CASES: readonly Case[] = [
     }),
   },
   {
+    payloadKey: "notes",
+    table: "sync_notes",
+    column: "title",
+    victimMarker: "enc-victim-note",
+    attackerMarker: "enc-attacker-note",
+    row: (uuid, updated_at, marker) => ({
+      uuid,
+      title: marker,
+      body: "enc-body",
+      timestamp: updated_at,
+      end_timestamp: null,
+      marker_uuid: null,
+      deleted: 0,
+      updated_at,
+    }),
+  },
+  {
     payloadKey: "tag_sticky_exclusions",
     table: "sync_tag_sticky_exclusions",
     column: "app_name",

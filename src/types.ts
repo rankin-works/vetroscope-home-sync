@@ -278,6 +278,17 @@ export interface SyncMarker {
   updated_at: string;
 }
 
+export interface SyncNote {
+  uuid: string;
+  title: string;
+  body: string;
+  timestamp: string;
+  end_timestamp: string | null;
+  marker_uuid: string | null;
+  deleted: number;
+  updated_at: string;
+}
+
 export interface SyncGoalAchievement {
   uuid: string;
   goal_uuid: string;
@@ -318,6 +329,9 @@ export interface PushPayload {
   tags?: SyncTag[];
   goals?: SyncGoal[];
   markers?: SyncMarker[];
+  // User-authored notes. Added in 027. Pre-027 servers silently drop
+  // this collection.
+  notes?: SyncNote[];
   achievements?: SyncGoalAchievement[];
   icons?: SyncIcon[];
   overrides?: SyncOverride[];
@@ -394,6 +408,9 @@ export interface PullResponse {
   tags: SyncTag[];
   goals: SyncGoal[];
   markers: SyncMarker[];
+  // User-authored notes. Empty when the server predates 027 or when
+  // the user has no notes. Added in 027.
+  notes?: SyncNote[];
   achievements: SyncGoalAchievement[];
   icons: SyncIcon[];
   overrides: SyncOverride[];

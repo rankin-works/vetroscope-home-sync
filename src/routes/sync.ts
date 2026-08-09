@@ -30,6 +30,7 @@ import type {
   SyncGoalAchievement,
   SyncIcon,
   SyncMarker,
+  SyncNote,
   SyncOverride,
   SyncSetting,
   SyncTag,
@@ -256,6 +257,33 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
          updated_at = excluded.updated_at
        WHERE sync_markers.user_id = excluded.user_id
          AND excluded.updated_at > sync_markers.updated_at`,
+    );
+
+    const upsertNote = stmts.prepare<
+      [
+        string,
+        string,
+        string,
+        string,
+        string,
+        string | null,
+        string | null,
+        number,
+        string,
+      ]
+    >(
+      `INSERT INTO sync_notes (uuid, user_id, title, body, timestamp, end_timestamp, marker_uuid, deleted, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(uuid) DO UPDATE SET
+         title = excluded.title,
+         body = excluded.body,
+         timestamp = excluded.timestamp,
+         end_timestamp = excluded.end_timestamp,
+         marker_uuid = excluded.marker_uuid,
+         deleted = excluded.deleted,
+         updated_at = excluded.updated_at
+       WHERE sync_notes.user_id = excluded.user_id
+         AND excluded.updated_at > sync_notes.updated_at`,
     );
 
     const upsertAchievement = stmts.prepare<
@@ -608,6 +636,19 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
           m.updated_at || now,
         );
       }
+      for (const n of (body.notes ?? []).slice(0, BATCH_SIZE)) {
+        upsertNote.run(
+          n.uuid,
+          userId,
+          n.title,
+          n.body,
+          n.timestamp,
+          n.end_timestamp ?? null,
+          n.marker_uuid ?? null,
+          n.deleted,
+          n.updated_at || now,
+        );
+      }
       for (const a of (body.achievements ?? []).slice(0, BATCH_SIZE)) {
         upsertAchievement.run(
           a.uuid,
@@ -814,6 +855,16 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
       .prepare<[string, string, number], SyncMarker>(
         `SELECT uuid, timestamp, end_timestamp, label, color, icon, deleted, updated_at
          FROM sync_markers
+         WHERE user_id = ? AND updated_at > ?
+         ORDER BY updated_at ASC
+         LIMIT ?`,
+      )
+      .all(userId, cursor, BATCH_SIZE);
+
+    const notes = fastify.db
+      .prepare<[string, string, number], SyncNote>(
+        `SELECT uuid, title, body, timestamp, end_timestamp, marker_uuid, deleted, updated_at
+         FROM sync_notes
          WHERE user_id = ? AND updated_at > ?
          ORDER BY updated_at ASC
          LIMIT ?`,
@@ -1159,7 +1210,7 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
       >("UPDATE devices SET last_sync_at = ? WHERE id = ? AND user_id = ?")
       .run(now, auth.device_id, userId);
 
-    // Time-cursor types: entries, tags, goals, markers, achievements.
+    // Time-cursor types: entries, tags, goals, markers, notes, achievements.
     // Icons + settings + tag_sticky_exclusions are governed by their own
     // compound cursors and tracked separately so the time cursor doesn't
     // have to lie about their state.
@@ -1168,6 +1219,7 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
       tags.length >= BATCH_SIZE ||
       goals.length >= BATCH_SIZE ||
       markers.length >= BATCH_SIZE ||
+      notes.length >= BATCH_SIZE ||
       achievements.length >= BATCH_SIZE;
     const hitLimitIcons = icons.length >= ICON_LIMIT;
     const hitLimitSettings = settings.length >= SETTING_LIMIT;
@@ -1181,7 +1233,7 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
 
     let newCursor = now;
     if (hitLimitTimeTypes) {
-      const latestPerType = [entries, tags, goals, markers, achievements]
+      const latestPerType = [entries, tags, goals, markers, notes, achievements]
         .filter((arr) => arr.length > 0)
         .map(
           (arr) =>
@@ -1270,6 +1322,7 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
       tags,
       goals,
       markers,
+      notes,
       achievements,
       icons,
       overrides,
@@ -1381,6 +1434,7 @@ export function wipeUserSyncRows(db: Database.Database, userId: string): void {
     "sync_tags",
     "sync_goals",
     "sync_markers",
+    "sync_notes",
     "sync_goal_achievements",
     "sync_icons",
     "sync_overrides",
