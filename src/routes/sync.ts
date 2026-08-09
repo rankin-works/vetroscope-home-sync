@@ -125,6 +125,7 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
         string,
         string,
         string,
+        string,
         string | null,
         string | null,
         string | null,
@@ -141,6 +142,11 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
       // a later push may carry a corrected classification that should
       // overwrite an older one.
       //
+      // updated_by_device_id is the pushing device (caller), not the
+      // activity-origin device_id. Pull filters on the writer so a tag
+      // (or is_passive) edit on another machine's rows still reaches
+      // that machine — filtering on device_id alone dropped them.
+      //
       // Cross-tenant guard: `uuid` is a global PRIMARY KEY, so a push
       // carrying another user's uuid would otherwise land as an UPDATE of
       // their row. The conflict UPDATE only fires when the existing row
@@ -148,13 +154,14 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
       // another user's row (accidental or hostile) is dropped silently
       // rather than overwriting it. Every uuid-keyed upsert below carries
       // the same guard.
-      `INSERT INTO sync_entries (uuid, user_id, device_id, timestamp, app_name, window_title, project, sub_project, is_adobe, is_passive, tag_uuid, platform, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO sync_entries (uuid, user_id, device_id, updated_by_device_id, timestamp, app_name, window_title, project, sub_project, is_adobe, is_passive, tag_uuid, platform, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(uuid) DO UPDATE SET
          sub_project = excluded.sub_project,
          is_passive = excluded.is_passive,
          tag_uuid = excluded.tag_uuid,
          platform = excluded.platform,
+         updated_by_device_id = excluded.updated_by_device_id,
          updated_at = excluded.updated_at
        WHERE sync_entries.user_id = excluded.user_id
          AND excluded.updated_at > sync_entries.updated_at`,
@@ -605,6 +612,7 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
           e.uuid,
           userId,
           safeDeviceId,
+          callerDeviceId,
           e.timestamp,
           e.app_name,
           e.window_title,
@@ -859,11 +867,16 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
     const deviceId = body.device_id ?? auth.device_id;
     const now = new Date().toISOString();
 
+    // Pull entries updated after cursor, excluding this device's own writes.
+    // Filter on updated_by_device_id (last pusher), not device_id (activity
+    // origin) — otherwise tagging another machine's past-day rows never
+    // reaches that machine. NULL writer (pre-migration) included defensively.
     const entries = fastify.db
       .prepare<[string, string, string, number], SyncEntry>(
         `SELECT uuid, device_id, timestamp, app_name, window_title, project, sub_project, is_adobe, is_passive, tag_uuid, platform, updated_at
          FROM sync_entries
-         WHERE user_id = ? AND updated_at > ? AND device_id != ?
+         WHERE user_id = ? AND updated_at > ?
+           AND (updated_by_device_id IS NULL OR updated_by_device_id != ?)
          ORDER BY updated_at ASC
          LIMIT ?`,
       )
