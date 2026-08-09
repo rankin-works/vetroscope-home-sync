@@ -39,6 +39,7 @@ import type {
   SyncTagStickyProjectApp,
   SyncTagStickySubprojectScope,
   SyncMediaLink,
+  SyncAppCategory,
   SyncReminder,
   SyncReminderEvent,
   SyncEntryDismissal,
@@ -462,6 +463,37 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
          AND excluded.updated_at > sync_media_links.updated_at`,
     );
 
+    // Activity category assignments (030). app_name + project encrypted;
+    // taxonomy fields cleartext. LWW on updated_at. Seed stays local.
+    const upsertAppCategory = stmts.prepare<
+      [
+        string,
+        string,
+        string,
+        string,
+        string,
+        number,
+        string,
+        string | null,
+        number,
+        string,
+      ]
+    >(
+      `INSERT INTO sync_app_categories (uuid, user_id, app_name, project, category_id, confidence, source, model, deleted, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(uuid) DO UPDATE SET
+         app_name = excluded.app_name,
+         project = excluded.project,
+         category_id = excluded.category_id,
+         confidence = excluded.confidence,
+         source = excluded.source,
+         model = excluded.model,
+         deleted = excluded.deleted,
+         updated_at = excluded.updated_at
+       WHERE sync_app_categories.user_id = excluded.user_id
+         AND excluded.updated_at > sync_app_categories.updated_at`,
+    );
+
     // Custom reminders (008). title + body encrypted client-side;
     // schedule fields cleartext so the server can validate / log them
     // without decrypting. LWW on updated_at like every other table.
@@ -786,6 +818,20 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
           ml.last_seen,
           ml.deleted,
           ml.updated_at || now,
+        );
+      }
+      for (const c of (body.app_categories ?? []).slice(0, BATCH_SIZE)) {
+        upsertAppCategory.run(
+          c.uuid,
+          userId,
+          c.app_name,
+          c.project,
+          c.category_id,
+          c.confidence,
+          c.source,
+          c.model ?? null,
+          c.deleted,
+          c.updated_at || now,
         );
       }
       for (const r of (body.reminders ?? []).slice(0, BATCH_SIZE)) {
@@ -1203,6 +1249,37 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
           )
           .all(userId, cursor, BATCH_SIZE);
 
+    // Activity category assignments (030). Compound cursor on
+    // (updated_at, uuid) — first enable may push the whole non-seed map
+    // in one shot. Legacy fallback uses the shared time cursor.
+    const appCategoryCursor = body.app_category_cursor;
+    const appCategories = appCategoryCursor
+      ? fastify.db
+          .prepare<[string, string, string, string, number], SyncAppCategory>(
+            `SELECT uuid, app_name, project, category_id, confidence, source, model, deleted, updated_at
+             FROM sync_app_categories
+             WHERE user_id = ?
+               AND (updated_at > ? OR (updated_at = ? AND uuid > ?))
+             ORDER BY updated_at ASC, uuid ASC
+             LIMIT ?`,
+          )
+          .all(
+            userId,
+            appCategoryCursor.updated_at,
+            appCategoryCursor.updated_at,
+            appCategoryCursor.key,
+            BATCH_SIZE,
+          )
+      : fastify.db
+          .prepare<[string, string, number], SyncAppCategory>(
+            `SELECT uuid, app_name, project, category_id, confidence, source, model, deleted, updated_at
+             FROM sync_app_categories
+             WHERE user_id = ? AND updated_at > ?
+             ORDER BY updated_at ASC, uuid ASC
+             LIMIT ?`,
+          )
+          .all(userId, cursor, BATCH_SIZE);
+
     // Custom reminders (008). Same compound-cursor hazard as media
     // links — a user creating several reminders in quick succession
     // clusters them at the same `now`. Tiebreaker is `uuid`. Legacy
@@ -1331,6 +1408,7 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
     const hitLimitSpa = tagStickyProjectApps.length >= BATCH_SIZE;
     const hitLimitSss = tagStickySubprojectScopes.length >= BATCH_SIZE;
     const hitLimitMediaLinks = mediaLinks.length >= BATCH_SIZE;
+    const hitLimitAppCategories = appCategories.length >= BATCH_SIZE;
     const hitLimitReminders = reminders.length >= BATCH_SIZE;
     const hitLimitReminderEvents = reminderEvents.length >= BATCH_SIZE;
     const hitLimitEntryDismissals = entryDismissals.length >= BATCH_SIZE;
@@ -1401,6 +1479,13 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
             key: mediaLinks[mediaLinks.length - 1]!.uuid,
           }
         : undefined;
+    const nextAppCategoryCursor =
+      hitLimitAppCategories && appCategories.length > 0
+        ? {
+            updated_at: appCategories[appCategories.length - 1]!.updated_at,
+            key: appCategories[appCategories.length - 1]!.uuid,
+          }
+        : undefined;
     const nextReminderCursor =
       hitLimitReminders && reminders.length > 0
         ? {
@@ -1452,6 +1537,7 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
       tag_sticky_project_apps: tagStickyProjectApps,
       tag_sticky_subproject_scopes: tagStickySubprojectScopes,
       media_links: mediaLinks,
+      app_categories: appCategories,
       reminders,
       reminder_events: reminderEvents,
       entry_dismissals: entryDismissals,
@@ -1464,6 +1550,7 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
         hitLimitSpa ||
         hitLimitSss ||
         hitLimitMediaLinks ||
+        hitLimitAppCategories ||
         hitLimitReminders ||
         hitLimitReminderEvents ||
         hitLimitEntryDismissals ||
@@ -1480,6 +1567,9 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
         : {}),
       ...(nextMediaLinkCursor
         ? { media_link_cursor: nextMediaLinkCursor }
+        : {}),
+      ...(nextAppCategoryCursor
+        ? { app_category_cursor: nextAppCategoryCursor }
         : {}),
       ...(nextReminderCursor ? { reminder_cursor: nextReminderCursor } : {}),
       ...(nextReminderEventCursor
@@ -1571,6 +1661,7 @@ export function wipeUserSyncRows(db: Database.Database, userId: string): void {
     "sync_tag_sticky_project_apps",
     "sync_tag_sticky_subproject_scopes",
     "sync_media_links",
+    "sync_app_categories",
     "sync_reminders",
     "sync_reminder_events",
     "sync_reminder_claims",

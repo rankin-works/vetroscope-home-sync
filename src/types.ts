@@ -194,6 +194,21 @@ export interface SyncMediaLink {
   updated_at: string;
 }
 
+// Per-(app, project) activity category. Seed stays local to the
+// desktop client; user / ai / catalog rows sync. app_name + project
+// encrypted; taxonomy fields cleartext. Added in 030.
+export interface SyncAppCategory {
+  uuid: string;
+  app_name: string; // encrypted client-side
+  project: string; // encrypted client-side ('' = app-wide)
+  category_id: string; // cleartext taxonomy id
+  confidence: number;
+  source: string; // cleartext: 'ai' | 'catalog' | 'user'
+  model: string | null;
+  deleted: number;
+  updated_at: string;
+}
+
 export interface SyncReminder {
   uuid: string;
   title: string; // encrypted client-side
@@ -362,6 +377,8 @@ export interface PushPayload {
   // Captured media URLs (Spotify track URIs, YouTube /watch URLs).
   // Added in 007. Pre-007 servers silently drop this collection.
   media_links?: SyncMediaLink[];
+  // Activity category assignments. Added in 030.
+  app_categories?: SyncAppCategory[];
   // Custom reminders. Added in 008. Pre-008 servers silently drop
   // this collection — local reminders still fire, they just don't
   // cross devices via that server.
@@ -409,6 +426,9 @@ export interface PullPayload {
   // the 007-aware build; older clients omit and the server falls
   // back to legacy time-only pagination.
   media_link_cursor?: CompoundCursor | null;
+  // Activity category assignments. Compound cursor on (updated_at,
+  // uuid). Added in 030.
+  app_category_cursor?: CompoundCursor | null;
   // Custom reminders. Same shared-timestamp hazard — a user may
   // create several reminders in quick succession, clustering rows
   // at the same `now`. Compound cursor on (updated_at, uuid).
@@ -449,6 +469,8 @@ export interface PullResponse {
   // pushing device(s) haven't opted into media-link sync, or when no
   // captured rows exist for the user. Added in 007.
   media_links?: SyncMediaLink[];
+  // Activity category assignments. Empty when the server predates 030.
+  app_categories?: SyncAppCategory[];
   // Custom reminders. Empty when the server predates 008 or when the
   // user has no reminders. Added in 008.
   reminders?: SyncReminder[];
@@ -471,6 +493,8 @@ export interface PullResponse {
   tag_sticky_subproject_scope_cursor?: CompoundCursor;
   // Added in 007 alongside the sync_media_links table.
   media_link_cursor?: CompoundCursor;
+  // Added in 030 alongside the sync_app_categories table.
+  app_category_cursor?: CompoundCursor;
   // Added in 008 alongside the sync_reminders table.
   reminder_cursor?: CompoundCursor;
   // Added in 014 alongside the sync_reminder_events table.
