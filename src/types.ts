@@ -309,11 +309,12 @@ export interface SyncNote {
   updated_at: string;
 }
 
-/** Nested note folders. name encrypted; hierarchy cleartext. Added in 028. */
+/** Nested note folders. name encrypted; hierarchy + color cleartext. Added in 028; color in 031. */
 export interface SyncNoteFolder {
   uuid: string;
   name: string;
   parent_uuid: string | null;
+  color?: string | null;
   deleted: number;
   updated_at: string;
 }

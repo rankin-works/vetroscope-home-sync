@@ -303,15 +303,16 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
     );
 
     const upsertNoteFolder = stmts.prepare<
-      [string, string, string, string | null, number, string]
+      [string, string, string, string | null, string | null, number, string]
     >(
       `INSERT INTO sync_note_folders (
-         uuid, user_id, name, parent_uuid, deleted, updated_at
+         uuid, user_id, name, parent_uuid, color, deleted, updated_at
        )
-       VALUES (?, ?, ?, ?, ?, ?)
+       VALUES (?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(uuid) DO UPDATE SET
          name = excluded.name,
          parent_uuid = excluded.parent_uuid,
+         color = excluded.color,
          deleted = excluded.deleted,
          updated_at = excluded.updated_at
        WHERE sync_note_folders.user_id = excluded.user_id
@@ -721,6 +722,7 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
           userId,
           f.name,
           f.parent_uuid ?? null,
+          f.color ?? null,
           f.deleted,
           f.updated_at || now,
         );
@@ -996,7 +998,7 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
       if (noteFolderCursor) {
         return fastify.db
           .prepare<[string, string, string, string, number], SyncNoteFolder>(
-            `SELECT uuid, name, parent_uuid, deleted, updated_at
+            `SELECT uuid, name, parent_uuid, color, deleted, updated_at
                FROM sync_note_folders
               WHERE user_id = ?
                 AND (updated_at > ? OR (updated_at = ? AND uuid > ?))
@@ -1013,7 +1015,7 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
       }
       return fastify.db
         .prepare<[string, string, number], SyncNoteFolder>(
-          `SELECT uuid, name, parent_uuid, deleted, updated_at
+          `SELECT uuid, name, parent_uuid, color, deleted, updated_at
              FROM sync_note_folders
             WHERE user_id = ? AND updated_at > ?
             ORDER BY updated_at ASC, uuid ASC

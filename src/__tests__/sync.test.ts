@@ -527,6 +527,37 @@ describe("/sync", () => {
     expect(byUuid.get("tag-child")!.icon_data_url).toBe("enc-icon-data-url");
   });
 
+  it("note folder push round-trips color", async () => {
+    const admin = await bootstrapAdmin(h);
+    const folder = {
+      uuid: "folder-amber",
+      name: "enc-clients",
+      parent_uuid: null,
+      color: "#f59e0b",
+      deleted: 0,
+      updated_at: "2026-08-14T12:00:00.000Z",
+    };
+    const push = await h.app.inject({
+      method: "POST",
+      url: "/sync/push",
+      headers: { authorization: `Bearer ${admin.accessToken}` },
+      payload: { note_folders: [folder] },
+    });
+    expect(push.statusCode).toBe(200);
+
+    const pull = await h.app.inject({
+      method: "POST",
+      url: "/sync/pull",
+      headers: { authorization: `Bearer ${admin.accessToken}` },
+      payload: { cursor: null, device_id: "other-device" },
+    });
+    expect(pull.statusCode).toBe(200);
+    const rows = pull.json().note_folders as Array<typeof folder>;
+    expect(rows).toHaveLength(1);
+    expect(rows[0].uuid).toBe("folder-amber");
+    expect(rows[0].color).toBe("#f59e0b");
+  });
+
   it("tag push round-trips sticky_subprojects and sticky_projects", async () => {
     // 011 added both columns. Before 011 they were
     // silently dropped on push and never returned on pull.
