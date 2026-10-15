@@ -554,8 +554,8 @@ describe("/sync", () => {
     expect(pull.statusCode).toBe(200);
     const rows = pull.json().note_folders as Array<typeof folder>;
     expect(rows).toHaveLength(1);
-    expect(rows[0].uuid).toBe("folder-amber");
-    expect(rows[0].color).toBe("#f59e0b");
+    expect(rows[0]!.uuid).toBe("folder-amber");
+    expect(rows[0]!.color).toBe("#f59e0b");
   });
 
   it("tag push round-trips sticky_subprojects and sticky_projects", async () => {
