@@ -319,6 +319,10 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
          AND excluded.updated_at > sync_note_folders.updated_at`,
     );
 
+    // A uuid already used by another row (another user's, or the same
+    // user's for another goal or day) is skipped, like a foreign uuid in
+    // the other tables. Without the second clause it hit the primary key,
+    // which the natural-key upsert doesn't cover, and failed the push.
     const upsertAchievement = stmts.prepare<
       [string, string, string, string, string, string, number, number, string]
     >(
@@ -330,7 +334,8 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
          current_seconds = excluded.current_seconds,
          deleted = excluded.deleted,
          updated_at = excluded.updated_at
-       WHERE excluded.updated_at > sync_goal_achievements.updated_at`,
+       WHERE excluded.updated_at > sync_goal_achievements.updated_at
+       ON CONFLICT(uuid) DO NOTHING`,
     );
 
     const upsertSetting = stmts.prepare<[string, string, string, string]>(

@@ -430,6 +430,58 @@ describe("/sync/push tenant isolation", () => {
     expect(row.updated_at).toBe(T_ATTACKER);
   });
 
+  it("skips a goal achievement whose uuid another user has, and keeps the rest of the push", async () => {
+    const victim = await bootstrapAdmin(h);
+    const attacker = await registerSecondUser(h, victim.accessToken);
+    const achievement = (goal: string, date: string) => ({
+      uuid: "shared-achievement",
+      goal_uuid: goal,
+      goal_snapshot: "{}",
+      date,
+      achieved_at: T_VICTIM,
+      current_seconds: 3600,
+      deleted: 0,
+      updated_at: T_VICTIM,
+    });
+    const rows = () =>
+      h.db
+        .prepare("SELECT user_id, goal_uuid, date FROM sync_goal_achievements")
+        .all() as Array<{ user_id: string; goal_uuid: string; date: string }>;
+
+    expect(
+      (await push(h, victim.accessToken, { achievements: [achievement("victim-goal", "2026-04-23")] })).statusCode,
+    ).toBe(200);
+
+    const attackerPush = await push(h, attacker.accessToken, {
+      entries: [
+        {
+          uuid: "attacker-entry",
+          device_id: attacker.deviceId,
+          timestamp: T_ATTACKER,
+          app_name: "Safari",
+          window_title: "x",
+          project: null,
+          is_adobe: 0,
+          tag_uuid: null,
+          platform: "win32",
+          updated_at: T_ATTACKER,
+        },
+      ],
+      achievements: [achievement("attacker-goal", "2026-04-23")],
+    });
+    expect(attackerPush.statusCode).toBe(200);
+    expect(
+      h.db.prepare("SELECT user_id FROM sync_entries WHERE uuid = ?").get("attacker-entry"),
+    ).toEqual({ user_id: attacker.userId });
+    expect(rows()).toEqual([{ user_id: victim.userId, goal_uuid: "victim-goal", date: "2026-04-23" }]);
+
+    // The same for a user's own uuid reused for another day.
+    expect(
+      (await push(h, victim.accessToken, { achievements: [achievement("victim-goal", "2026-04-24")] })).statusCode,
+    ).toBe(200);
+    expect(rows()).toHaveLength(1);
+  });
+
   it("two users pushing distinct uuids both persist", async () => {
     const victim = await bootstrapAdmin(h);
     const attacker = await registerSecondUser(h, victim.accessToken);
