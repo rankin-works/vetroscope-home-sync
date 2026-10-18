@@ -16,6 +16,26 @@ here, open an issue at
 3. On a Synology NAS, the built-in firewall often needs an explicit
    "allow 4437" rule even on the same subnet.
 
+## Sync shows an error about the upload being too large or dropped
+
+The server is reachable, but it (or something in front of it) refused
+a sync upload. Sign-in still works because it sends very little.
+
+1. **Check the server log** for `Request body is too large` (HTTP
+   413). If it's there, the request reached Home Sync and was over its
+   10 MB limit. Update Vetroscope to 1.2.6 or later on every device;
+   those versions keep each upload under 4 MB.
+2. **If the server log shows nothing**, a reverse proxy turned the
+   upload down before it arrived. nginx allows only 1 MB by default:
+   set `client_max_body_size 20m;`. See
+   [Allow large enough uploads](reverse-proxy.md#allow-large-enough-uploads)
+   for other proxies.
+3. Once it's fixed, the device catches up on its own at the next sync.
+   Nothing is lost: rows that didn't upload stay queued on the device.
+
+Vetroscope versions before 1.2.6 showed this as **Unreachable**, even
+though the server was running.
+
 ## `invalid_setup_token` when running /setup
 
 The setup code is:

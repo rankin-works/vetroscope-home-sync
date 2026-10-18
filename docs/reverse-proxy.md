@@ -111,6 +111,32 @@ server {
 }
 ```
 
+## Allow large enough uploads
+
+Home Sync accepts request bodies up to **10 MB**. Your proxy needs to
+allow at least that much, or syncing fails once a device has a lot to
+upload (a first sync, or a long history of alerts, whose app icons
+travel with them).
+
+Vetroscope 1.2.6 and later split uploads so each stays under 4 MB.
+Older versions could send more than 10 MB in one request, which the
+server turns down; updating the app fixes that.
+
+What each proxy allows by default:
+
+| Proxy | Default limit | What to do |
+|-------|---------------|------------|
+| nginx | **1 MB** | Set `client_max_body_size 20m;` in the `server` block (the example above already does). |
+| Caddy | No limit | Nothing. |
+| Traefik | No limit | Nothing, unless you've added a `buffering` middleware with `maxRequestBodyBytes`; keep it at 10 MB or more. |
+| Cloudflare Tunnel / proxied DNS | 100 MB on the Free plan | Nothing. |
+| Apache (`mod_proxy`) | 1 GB (2.4.53+), none before | Nothing, unless you've lowered `LimitRequestBody`; keep it at 10 MB or more. |
+
+When a proxy turns an upload down, the device shows **Error** for the
+server in Settings → Sync, saying the upload was refused as too large
+or dropped partway through. See
+[troubleshooting](troubleshooting.md#sync-shows-an-error-about-the-upload-being-too-large-or-dropped).
+
 ## Tell the server it's behind a proxy
 
 Whichever proxy you use, set `VS_TRUST_PROXY=true` on the container:
