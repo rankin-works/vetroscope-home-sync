@@ -17,8 +17,12 @@ always-on laptop).
 - A data directory on disk that you're okay persisting time-tracking
   data to. Examples: `/mnt/nas/vetroscope`, `/var/lib/vetroscope`.
   Home Sync creates `sync.db` + friends inside this directory.
-- A Vetroscope Licensed or Pro client. Trial users can browse the
-  Home Sync settings but the "Enable" toggle is locked.
+- A Vetroscope account with a license (Licensed or Pro), or a running
+  trial. You sign in to Vetroscope with that account and add Home Sync
+  to it as a sync server. Your tracked data goes only to your server;
+  Vetroscope's servers just check the license. An account on your Home
+  Sync server is a separate login for the server and doesn't include a
+  license.
 
 ## 1. Deploy the container
 
@@ -82,7 +86,7 @@ further request.
 
 ## 4. Connect the Vetroscope client
 
-On a Licensed or Pro client:
+In Vetroscope, signed in with your Vetroscope account:
 
 1. Open **Settings → Sync** and click **Add sync target**.
 2. Choose **Home Sync**.
