@@ -120,6 +120,9 @@ export interface SyncEntry {
   tag_uuid: string | null;
   platform: string | null;
   updated_at: string;
+  // Server-assigned save order (032). Present on pulled rows written since
+  // then; ignored on push.
+  seq?: number | null;
 }
 
 export interface SyncTag {
@@ -405,9 +408,17 @@ export interface CompoundCursor {
   key: string;
 }
 
+// Where a pull resumes entries (032). `after` pages by updated_at (rows
+// written before seq existed, or a full replay); `seq` pages by the
+// server-assigned save order and can't skip a row.
+export type EntryCursor = { after: string } | { seq: number };
+
 export interface PullPayload {
   cursor: string | null;
   device_id: string;
+  // Entries' own cursor. Clients that send it page entries separately
+  // from `cursor`; older clients omit it and entries follow `cursor`.
+  entry_cursor?: EntryCursor | null;
   // Per-type compound cursors. Sent by clients that understand the
   // compound-cursor protocol (v0.1.0-beta.4+). Servers ignore unknown
   // fields, so older servers reject nothing.
@@ -480,6 +491,9 @@ export interface PullResponse {
   // Dispute-time-block tombstones. Added in 012.
   entry_dismissals?: SyncEntryDismissal[];
   cursor: string;
+  // Next entry cursor (032). Always sent; clients that don't know it
+  // ignore it.
+  entry_cursor?: EntryCursor;
   has_more?: boolean;
   // Set by v0.1.0-beta.4+ servers when icons / settings were paginated.
   // The client round-trips them on the next pull. Absent when the

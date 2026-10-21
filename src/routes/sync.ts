@@ -21,6 +21,7 @@ import type { FastifyPluginAsync } from "fastify";
 import type Database from "better-sqlite3";
 
 import type {
+  EntryCursor,
   JWTPayload,
   PullPayload,
   PullResponse,
@@ -49,6 +50,36 @@ import { SERVER_MIN_CLIENT_VERSION } from "./server-info.js";
 
 const BATCH_SIZE = 500;
 const ICON_LIMIT = 50;
+
+/** A client's entry cursor, or null when it sent none (or a malformed one,
+ *  which falls back to the shared time cursor like an older client). */
+export function parseEntryCursor(raw: unknown): EntryCursor | null {
+  if (!raw || typeof raw !== "object") return null;
+  const c = raw as Record<string, unknown>;
+  if (typeof c.seq === "number" && Number.isSafeInteger(c.seq) && c.seq >= 0) return { seq: c.seq };
+  if (typeof c.after === "string" && !Number.isNaN(Date.parse(c.after))) return { after: c.after };
+  return null;
+}
+
+/** Where the next pull resumes entries. A full page continues from its last
+ *  row (by seq, or by updated_at while still catching up on rows older than
+ *  seq). Otherwise the client is caught up and moves to seq at `maxSeq`,
+ *  read before the entries were: any row saved since got a higher number,
+ *  so it comes next time instead of being skipped. */
+export function nextEntryCursorAfter(
+  current: EntryCursor | null,
+  entries: Array<{ updated_at: string; seq?: number | null }>,
+  hitLimit: boolean,
+  maxSeq: number,
+): EntryCursor {
+  const bySeq = current !== null && "seq" in current;
+  const last = entries[entries.length - 1];
+  if (hitLimit && last) {
+    if (!bySeq) return { after: last.updated_at };
+    if (typeof last.seq === "number") return { seq: last.seq };
+  }
+  return { seq: Math.max(maxSeq, bySeq ? current.seq : 0) };
+}
 const OVERRIDE_PULL_LIMIT = 500;
 // Settings are a small allowlist (see SYNCED_SETTING_KEYS) so the legacy
 // behavior was "no LIMIT" — it always fit in one response. With the
@@ -155,15 +186,19 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
       // another user's row (accidental or hostile) is dropped silently
       // rather than overwriting it. Every uuid-keyed upsert below carries
       // the same guard.
-      `INSERT INTO sync_entries (uuid, user_id, device_id, updated_by_device_id, timestamp, app_name, window_title, project, sub_project, is_adobe, is_passive, tag_uuid, platform, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      //
+      // seq: the next number from the shared counter (032), taken as the
+      // row is written, so pulls page by save order.
+      `INSERT INTO sync_entries (uuid, user_id, device_id, updated_by_device_id, timestamp, app_name, window_title, project, sub_project, is_adobe, is_passive, tag_uuid, platform, updated_at, seq)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(seq), 0) + 1 FROM sync_entries))
        ON CONFLICT(uuid) DO UPDATE SET
          sub_project = excluded.sub_project,
          is_passive = excluded.is_passive,
          tag_uuid = excluded.tag_uuid,
          platform = excluded.platform,
          updated_by_device_id = excluded.updated_by_device_id,
-         updated_at = excluded.updated_at
+         updated_at = excluded.updated_at,
+         seq = excluded.seq
        WHERE sync_entries.user_id = excluded.user_id
          AND excluded.updated_at > sync_entries.updated_at`,
     );
@@ -920,20 +955,47 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
     const deviceId = body.device_id ?? auth.device_id;
     const now = new Date().toISOString();
 
-    // Pull entries updated after cursor, excluding this device's own writes.
-    // Filter on updated_by_device_id (last pusher), not device_id (activity
-    // origin) — otherwise tagging another machine's past-day rows never
-    // reaches that machine. NULL writer (pre-migration) included defensively.
-    const entries = fastify.db
-      .prepare<[string, string, string, number], SyncEntry>(
-        `SELECT uuid, device_id, timestamp, app_name, window_title, project, sub_project, is_adobe, is_passive, tag_uuid, platform, updated_at
-         FROM sync_entries
-         WHERE user_id = ? AND updated_at > ?
-           AND (updated_by_device_id IS NULL OR updated_by_device_id != ?)
-         ORDER BY updated_at ASC
-         LIMIT ?`,
-      )
-      .all(userId, cursor, deviceId, BATCH_SIZE);
+    // Pull entries, excluding this device's own writes. Filter on
+    // updated_by_device_id (last pusher), not device_id (activity origin) —
+    // otherwise tagging another machine's past-day rows never reaches that
+    // machine. NULL writer (pre-migration) included defensively.
+    //
+    // Entries page by their own cursor when the client sends one (see
+    // EntryCursor): by seq once caught up, by updated_at before that. Older
+    // clients send none and page entries by the shared `cursor` as before.
+    // MAX(seq) is read first: every row numbered up to it is already
+    // saved, so the caught-up cursor can't pass a row this read missed.
+    const entryCursor = parseEntryCursor(body.entry_cursor);
+    const maxSeq =
+      fastify.db
+        .prepare<[string], { s: number | null }>(
+          "SELECT MAX(seq) AS s FROM sync_entries WHERE user_id = ?",
+        )
+        .get(userId)?.s ?? 0;
+    const entries =
+      entryCursor && "seq" in entryCursor
+        ? fastify.db
+            .prepare<[string, number, string, number], SyncEntry>(
+              `SELECT uuid, device_id, timestamp, app_name, window_title, project, sub_project, is_adobe, is_passive, tag_uuid, platform, updated_at, seq
+               FROM sync_entries
+               WHERE user_id = ? AND seq > ?
+                 AND (updated_by_device_id IS NULL OR updated_by_device_id != ?)
+               ORDER BY seq ASC
+               LIMIT ?`,
+            )
+            .all(userId, entryCursor.seq, deviceId, BATCH_SIZE)
+        : fastify.db
+            .prepare<[string, string, string, number], SyncEntry>(
+              `SELECT uuid, device_id, timestamp, app_name, window_title, project, sub_project, is_adobe, is_passive, tag_uuid, platform, updated_at, seq
+               FROM sync_entries
+               WHERE user_id = ? AND updated_at > ?
+                 AND (updated_by_device_id IS NULL OR updated_by_device_id != ?)
+               ORDER BY updated_at ASC
+               LIMIT ?`,
+            )
+            .all(userId, entryCursor?.after ?? cursor, deviceId, BATCH_SIZE);
+    const hitLimitEntries = entries.length >= BATCH_SIZE;
+    const nextEntryCursor = nextEntryCursorAfter(entryCursor, entries, hitLimitEntries, maxSeq);
 
     const tags = fastify.db
       .prepare<[string, string, number], SyncTag>(
@@ -1403,8 +1465,10 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
     // Notes + note folders use compound cursors (like reminders) so a
     // clustered push doesn't lose rows past the first page. Icons /
     // settings / sticky tables share the same compound pattern.
+    // Entries join the shared time cursor only for clients without an
+    // entry cursor; the rest page entries on their own (nextEntryCursor).
     const hitLimitTimeTypes =
-      entries.length >= BATCH_SIZE ||
+      (!entryCursor && hitLimitEntries) ||
       tags.length >= BATCH_SIZE ||
       goals.length >= BATCH_SIZE ||
       markers.length >= BATCH_SIZE ||
@@ -1424,7 +1488,7 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
 
     let newCursor = now;
     if (hitLimitTimeTypes) {
-      const latestPerType = [entries, tags, goals, markers, achievements]
+      const latestPerType = [entryCursor ? [] : entries, tags, goals, markers, achievements]
         .filter((arr) => arr.length > 0)
         .map(
           (arr) =>
@@ -1549,8 +1613,10 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
       reminder_events: reminderEvents,
       entry_dismissals: entryDismissals,
       cursor: newCursor,
+      entry_cursor: nextEntryCursor,
       has_more:
         hitLimitTimeTypes ||
+        hitLimitEntries ||
         hitLimitIcons ||
         hitLimitSettings ||
         hitLimitTse ||

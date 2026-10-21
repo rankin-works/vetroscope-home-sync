@@ -13,7 +13,7 @@ import {
   verifyPassword,
   PBKDF2_ITERATIONS,
 } from "../lib/crypto.js";
-import { listDevices } from "../lib/device-service.js";
+import { listDeviceAliases, listDevices } from "../lib/device-service.js";
 import { issueTokens, MIN_PASSWORD_LENGTH } from "../lib/auth-service.js";
 import { encryptSyncDek, decryptSyncDek } from "../lib/secret-crypto.js";
 import { buildRateLimiter } from "../middleware/ratelimit.js";
@@ -92,6 +92,9 @@ export const userRoutes: FastifyPluginAsync = async (fastify) => {
         created_at: d.created_at,
         is_current: d.id === auth.device_id,
       })),
+      // Ids desktops were moved off (adoptDeviceId), so the app can relabel
+      // entries it pulled under an old id.
+      device_aliases: listDeviceAliases(fastify.db, auth.sub),
     });
   });
 

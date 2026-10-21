@@ -91,3 +91,76 @@ export function listDevices(db: DB, userId: string): DeviceRow[] {
     )
     .all(userId);
 }
+
+const DEVICE_UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// Move a desktop's session from the device id this server gave it
+// (`fromId`) to the id the desktop itself uses (`toId`), so every server it
+// syncs with knows the machine by one id. Without this, a server that
+// registered the machine under a different id rewrites the id on its
+// entries, and the user's other desktops show an extra, unnamed device.
+//
+// Only within one user: `toId` must be unused, or already one of this
+// user's devices on the same platform (a stale row for the same machine,
+// which the session is merged into). Web sessions have no device row and
+// are left alone. Returns the id the session now uses.
+export function adoptDeviceId(
+  db: DB,
+  userId: string,
+  fromId: string,
+  toId: string,
+): string {
+  if (fromId === toId || !DEVICE_UUID_RE.test(toId)) return fromId;
+  const source = findDevice(db, userId, fromId);
+  if (source === undefined) return fromId;
+  const existing = db
+    .prepare<[string], { user_id: string; platform: string }>(
+      "SELECT user_id, platform FROM devices WHERE id = ?",
+    )
+    .get(toId);
+  if (
+    existing !== undefined &&
+    (existing.user_id !== userId || existing.platform !== source.platform)
+  ) {
+    return fromId;
+  }
+
+  const move = (sql: string) =>
+    db.prepare<[string, string, string]>(sql).run(toId, userId, fromId);
+  db.transaction(() => {
+    if (existing === undefined) {
+      db.prepare<[string, string, string]>(
+        `INSERT INTO devices (id, user_id, device_name, platform, last_sync_at, created_at, app_version)
+         SELECT ?, user_id, device_name, platform, last_sync_at, created_at, app_version
+           FROM devices WHERE user_id = ? AND id = ?`,
+      ).run(toId, userId, fromId);
+    }
+    move("UPDATE refresh_tokens SET device_id = ? WHERE user_id = ? AND device_id = ?");
+    move("UPDATE sync_entries SET device_id = ? WHERE user_id = ? AND device_id = ?");
+    move("UPDATE sync_entries SET updated_by_device_id = ? WHERE user_id = ? AND updated_by_device_id = ?");
+    move("UPDATE OR IGNORE sync_reminder_claims SET device_id = ? WHERE user_id = ? AND device_id = ?");
+    move("UPDATE google_calendar_leader SET device_id = ? WHERE user_id = ? AND device_id = ?");
+    // Record the move for the user's other desktops (033), and point
+    // earlier moves to this id at the new one.
+    move("UPDATE device_aliases SET new_id = ? WHERE user_id = ? AND new_id = ?");
+    db.prepare<[string, string]>("DELETE FROM device_aliases WHERE user_id = ? AND old_id = ?").run(userId, toId);
+    db.prepare<[string, string, string]>(
+      "INSERT OR REPLACE INTO device_aliases (user_id, old_id, new_id) VALUES (?, ?, ?)",
+    ).run(userId, fromId, toId);
+    db.prepare<[string, string]>("DELETE FROM devices WHERE user_id = ? AND id = ?").run(userId, fromId);
+  })();
+  return toId;
+}
+
+// Ids this user's desktops were moved off, and where to (see adoptDeviceId).
+export function listDeviceAliases(
+  db: DB,
+  userId: string,
+): Array<{ old_id: string; new_id: string }> {
+  return db
+    .prepare<[string], { old_id: string; new_id: string }>(
+      "SELECT old_id, new_id FROM device_aliases WHERE user_id = ?",
+    )
+    .all(userId);
+}

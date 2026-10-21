@@ -29,6 +29,7 @@ import {
   PBKDF2_ITERATIONS,
 } from "../lib/crypto.js";
 import {
+  adoptDeviceId,
   assertDeviceCapacity,
   DeviceLimitReachedError,
   findDevice,
@@ -68,6 +69,9 @@ interface RefreshBody {
   // on each refresh so the server's view of "what version is this
   // device on?" stays current even between explicit logins.
   app_version?: string;
+  // The device id the desktop uses locally. When it differs from the
+  // session's, the session moves to it (adoptDeviceId).
+  canonical_device_id?: string;
 }
 
 export const authRoutes: FastifyPluginAsync = async (fastify) => {
@@ -335,15 +339,19 @@ export const authRoutes: FastifyPluginAsync = async (fastify) => {
         .run(tokenHash);
 
       recordDeviceAppVersion(fastify.db, stored.id, stored.device_id, body.app_version);
+      const deviceId =
+        typeof body.canonical_device_id === "string"
+          ? adoptDeviceId(fastify.db, stored.id, stored.device_id, body.canonical_device_id)
+          : stored.device_id;
       const tokens = await issueTokens(
         fastify.db,
         fastify.jwtSecret,
         stored,
-        stored.device_id,
+        deviceId,
       );
       return reply.send({
         user: publicUser(stored),
-        device_id: stored.device_id,
+        device_id: deviceId,
         ...tokens,
       });
     },
