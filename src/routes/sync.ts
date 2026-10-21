@@ -51,6 +51,166 @@ import { SERVER_MIN_CLIENT_VERSION } from "./server-info.js";
 const BATCH_SIZE = 500;
 const ICON_LIMIT = 50;
 
+/** Pulled tables that page by `seq` (034) once the client sends a cursor
+ *  for them in `seq_cursors`, keyed by their field in the pull response.
+ *  Columns match each table's time-cursor query in /sync/pull. */
+const SEQ_TABLES = {
+  tags: {
+    table: "sync_tags",
+    columns: "uuid, name, color, sticky, sticky_subprojects, sticky_projects, icon_data_url, parent_uuid, deleted, archived, updated_at",
+    limit: BATCH_SIZE,
+  },
+  goals: {
+    table: "sync_goals",
+    columns: "uuid, type, app_name, tag_uuid, target_seconds, enabled, deleted, created_at, updated_at",
+    limit: BATCH_SIZE,
+  },
+  markers: {
+    table: "sync_markers",
+    columns: "uuid, timestamp, end_timestamp, label, color, icon, deleted, updated_at",
+    limit: BATCH_SIZE,
+  },
+  notes: {
+    table: "sync_notes",
+    columns: "uuid, title, body, timestamp, end_timestamp, marker_uuid, folder_uuid, pinned, deleted, updated_at",
+    limit: BATCH_SIZE,
+  },
+  note_folders: {
+    table: "sync_note_folders",
+    columns: "uuid, name, parent_uuid, color, deleted, updated_at",
+    limit: BATCH_SIZE,
+  },
+  achievements: {
+    table: "sync_goal_achievements",
+    columns: "uuid, goal_uuid, goal_snapshot, date, achieved_at, current_seconds, deleted, updated_at",
+    limit: BATCH_SIZE,
+  },
+  icons: {
+    table: "sync_icons",
+    columns: "name_hash, app_name, platform, data_url, dominant_color, updated_at",
+    limit: ICON_LIMIT,
+  },
+  tag_sticky_exclusions: {
+    table: "sync_tag_sticky_exclusions",
+    columns: "uuid, tag_uuid, app_name, project, deleted, updated_at",
+    limit: BATCH_SIZE,
+  },
+  tag_sticky_project_apps: {
+    table: "sync_tag_sticky_project_apps",
+    columns: "uuid, tag_uuid, app_name, deleted, updated_at",
+    limit: BATCH_SIZE,
+  },
+  tag_sticky_subproject_scopes: {
+    table: "sync_tag_sticky_subproject_scopes",
+    columns: "uuid, tag_uuid, app_name, project, deleted, updated_at",
+    limit: BATCH_SIZE,
+  },
+  media_links: {
+    table: "sync_media_links",
+    columns: "uuid, app_name, project, sub_project, url, kind, first_seen, last_seen, deleted, updated_at",
+    limit: BATCH_SIZE,
+  },
+  app_categories: {
+    table: "sync_app_categories",
+    columns: "uuid, app_name, project, category_id, confidence, source, model, deleted, updated_at",
+    limit: BATCH_SIZE,
+  },
+  reminders: {
+    table: "sync_reminders",
+    columns: "uuid, title, body, kind, fire_at, weekdays, time_of_day, end_time_of_day, start_date, end_date, tag_uuid, threshold_seconds, period, icon_data_url, interval_seconds, app_name, project, goal_uuid, goal_notify_half, goal_notify_complete, enabled, deleted, last_fired_at, updated_at",
+    limit: BATCH_SIZE,
+  },
+  reminder_events: {
+    table: "sync_reminder_events",
+    columns: "uuid, reminder_uuid, title, body, icon_data_url, fired_at, read_at, dismissed_at, deleted, updated_at",
+    limit: BATCH_SIZE,
+  },
+  entry_dismissals: {
+    table: "sync_entry_dismissals",
+    columns: "uuid, deleted, updated_at",
+    limit: BATCH_SIZE,
+  },
+} as const;
+export type SeqTable = keyof typeof SEQ_TABLES;
+
+/** The client's per-table seq cursors; a table it didn't send (an older
+ *  client, or a malformed value) pages by the time cursor as before. */
+export function parseSeqCursors(
+  raw: unknown,
+): Partial<Record<SeqTable, number>> {
+  const out: Partial<Record<SeqTable, number>> = {};
+  if (!raw || typeof raw !== "object") return out;
+  for (const key of Object.keys(SEQ_TABLES) as SeqTable[]) {
+    const v = (raw as Record<string, unknown>)[key];
+    if (typeof v === "number" && Number.isSafeInteger(v) && v >= 0) {
+      out[key] = v;
+    }
+  }
+  return out;
+}
+
+/** MAX(seq) of each table for one user, read before the rows are: every
+ *  row numbered up to it is already saved. */
+function maxSeqs(
+  db: Database.Database,
+  userId: string,
+): Record<SeqTable, number> {
+  const keys = Object.keys(SEQ_TABLES) as SeqTable[];
+  const columns = keys.map(
+    (k) =>
+      `(SELECT MAX(seq) FROM ${SEQ_TABLES[k].table} WHERE user_id = @user) AS ${k}`,
+  );
+  const row = db
+    .prepare<{ user: string }, Record<SeqTable, number | null>>(
+      `SELECT ${columns.join(", ")}`,
+    )
+    .get({ user: userId });
+  return Object.fromEntries(keys.map((k) => [k, row?.[k] ?? 0])) as Record<
+    SeqTable,
+    number
+  >;
+}
+
+function pullBySeq<T>(
+  db: Database.Database,
+  userId: string,
+  key: SeqTable,
+  after: number,
+): T[] {
+  const t = SEQ_TABLES[key];
+  return db
+    .prepare<[string, number, number], T>(
+      `SELECT ${t.columns}, seq FROM ${t.table}
+        WHERE user_id = ? AND seq > ?
+        ORDER BY seq ASC
+        LIMIT ?`,
+    )
+    .all(userId, after, t.limit);
+}
+
+/** Where each seq-paged table resumes: after a full page's last row, or at
+ *  the MAX(seq) read before the rows once caught up (so a row saved since
+ *  comes next time instead of being skipped). */
+export function nextSeqCursors(
+  sent: Partial<Record<SeqTable, number>>,
+  rows: Record<SeqTable, Array<{ seq?: number | null }>>,
+  maxes: Record<SeqTable, number>,
+): { cursors: Partial<Record<SeqTable, number>>; hitLimit: boolean } {
+  const cursors: Partial<Record<SeqTable, number>> = {};
+  let hitLimit = false;
+  for (const key of Object.keys(sent) as SeqTable[]) {
+    const list = rows[key];
+    const last = list[list.length - 1];
+    if (list.length >= SEQ_TABLES[key].limit && typeof last?.seq === "number") {
+      cursors[key] = last.seq;
+      hitLimit = true;
+    } else {
+      cursors[key] = Math.max(maxes[key], sent[key]!);
+    }
+  }
+  return { cursors, hitLimit };
+}
+
 /** A client's entry cursor, or null when it sent none (or a malformed one,
  *  which falls back to the shared time cursor like an older client). */
 export function parseEntryCursor(raw: unknown): EntryCursor | null {
@@ -149,6 +309,10 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
     const now = new Date().toISOString();
 
     const stmts = fastify.db;
+    // Every write to a pulled table sets `seq` to the next number from that
+    // table's counter (032 / 034), so a pull that pages by seq sees it. A
+    // write that skips it never reaches desktops already past the row's
+    // old number.
 
     const upsertEntry = stmts.prepare<
       [
@@ -226,8 +390,8 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
       // sticky_projects (011) gate opt-in auto-tagging of new
       // sub-breakdowns / breakdowns. archived (008) marks the tag
       // hidden-but-preserved client-side.
-      `INSERT INTO sync_tags (uuid, user_id, name, color, sticky, sticky_subprojects, sticky_projects, icon_data_url, parent_uuid, deleted, archived, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO sync_tags (uuid, user_id, name, color, sticky, sticky_subprojects, sticky_projects, icon_data_url, parent_uuid, deleted, archived, updated_at, seq)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(seq), 0) + 1 FROM sync_tags))
        ON CONFLICT(uuid) DO UPDATE SET
          name = excluded.name,
          color = excluded.color,
@@ -238,7 +402,8 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
          parent_uuid = excluded.parent_uuid,
          deleted = excluded.deleted,
          archived = excluded.archived,
-         updated_at = excluded.updated_at
+         updated_at = excluded.updated_at,
+             seq = excluded.seq
        WHERE sync_tags.user_id = excluded.user_id
          AND excluded.updated_at > sync_tags.updated_at`,
     );
@@ -261,8 +426,8 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
       // uses COALESCE so a later push that omits it (e.g. an older client)
       // can't clobber the original creation timestamp recorded by the
       // first device to push the goal.
-      `INSERT INTO sync_goals (uuid, user_id, type, app_name, tag_uuid, target_seconds, enabled, deleted, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO sync_goals (uuid, user_id, type, app_name, tag_uuid, target_seconds, enabled, deleted, created_at, updated_at, seq)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(seq), 0) + 1 FROM sync_goals))
        ON CONFLICT(uuid) DO UPDATE SET
          type = excluded.type,
          app_name = excluded.app_name,
@@ -271,7 +436,8 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
          enabled = excluded.enabled,
          deleted = excluded.deleted,
          created_at = COALESCE(sync_goals.created_at, excluded.created_at),
-         updated_at = excluded.updated_at
+         updated_at = excluded.updated_at,
+             seq = excluded.seq
        WHERE sync_goals.user_id = excluded.user_id
          AND excluded.updated_at > sync_goals.updated_at`,
     );
@@ -289,8 +455,8 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
         string,
       ]
     >(
-      `INSERT INTO sync_markers (uuid, user_id, timestamp, end_timestamp, label, color, icon, deleted, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO sync_markers (uuid, user_id, timestamp, end_timestamp, label, color, icon, deleted, updated_at, seq)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(seq), 0) + 1 FROM sync_markers))
        ON CONFLICT(uuid) DO UPDATE SET
          timestamp = excluded.timestamp,
          end_timestamp = excluded.end_timestamp,
@@ -298,7 +464,8 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
          color = excluded.color,
          icon = excluded.icon,
          deleted = excluded.deleted,
-         updated_at = excluded.updated_at
+         updated_at = excluded.updated_at,
+             seq = excluded.seq
        WHERE sync_markers.user_id = excluded.user_id
          AND excluded.updated_at > sync_markers.updated_at`,
     );
@@ -320,9 +487,9 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
     >(
       `INSERT INTO sync_notes (
          uuid, user_id, title, body, timestamp, end_timestamp,
-         marker_uuid, folder_uuid, pinned, deleted, updated_at
+         marker_uuid, folder_uuid, pinned, deleted, updated_at, seq
        )
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(seq), 0) + 1 FROM sync_notes))
        ON CONFLICT(uuid) DO UPDATE SET
          title = excluded.title,
          body = excluded.body,
@@ -332,7 +499,8 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
          folder_uuid = excluded.folder_uuid,
          pinned = excluded.pinned,
          deleted = excluded.deleted,
-         updated_at = excluded.updated_at
+         updated_at = excluded.updated_at,
+             seq = excluded.seq
        WHERE sync_notes.user_id = excluded.user_id
          AND excluded.updated_at > sync_notes.updated_at`,
     );
@@ -341,15 +509,16 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
       [string, string, string, string | null, string | null, number, string]
     >(
       `INSERT INTO sync_note_folders (
-         uuid, user_id, name, parent_uuid, color, deleted, updated_at
+         uuid, user_id, name, parent_uuid, color, deleted, updated_at, seq
        )
-       VALUES (?, ?, ?, ?, ?, ?, ?)
+       VALUES (?, ?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(seq), 0) + 1 FROM sync_note_folders))
        ON CONFLICT(uuid) DO UPDATE SET
          name = excluded.name,
          parent_uuid = excluded.parent_uuid,
          color = excluded.color,
          deleted = excluded.deleted,
-         updated_at = excluded.updated_at
+         updated_at = excluded.updated_at,
+             seq = excluded.seq
        WHERE sync_note_folders.user_id = excluded.user_id
          AND excluded.updated_at > sync_note_folders.updated_at`,
     );
@@ -361,14 +530,15 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
     const upsertAchievement = stmts.prepare<
       [string, string, string, string, string, string, number, number, string]
     >(
-      `INSERT INTO sync_goal_achievements (uuid, user_id, goal_uuid, goal_snapshot, date, achieved_at, current_seconds, deleted, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO sync_goal_achievements (uuid, user_id, goal_uuid, goal_snapshot, date, achieved_at, current_seconds, deleted, updated_at, seq)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(seq), 0) + 1 FROM sync_goal_achievements))
        ON CONFLICT(user_id, goal_uuid, date) DO UPDATE SET
          goal_snapshot = excluded.goal_snapshot,
          achieved_at = excluded.achieved_at,
          current_seconds = excluded.current_seconds,
          deleted = excluded.deleted,
-         updated_at = excluded.updated_at
+         updated_at = excluded.updated_at,
+             seq = excluded.seq
        WHERE excluded.updated_at > sync_goal_achievements.updated_at
        ON CONFLICT(uuid) DO NOTHING`,
     );
@@ -385,14 +555,15 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
     const upsertIcon = stmts.prepare<
       [string, string, string, string, string, string, string]
     >(
-      `INSERT INTO sync_icons (name_hash, user_id, app_name, platform, data_url, dominant_color, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO sync_icons (name_hash, user_id, app_name, platform, data_url, dominant_color, updated_at, seq)
+       VALUES (?, ?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(seq), 0) + 1 FROM sync_icons))
        ON CONFLICT(name_hash, user_id) DO UPDATE SET
          app_name = excluded.app_name,
          platform = excluded.platform,
          data_url = excluded.data_url,
          dominant_color = excluded.dominant_color,
-         updated_at = excluded.updated_at
+         updated_at = excluded.updated_at,
+             seq = excluded.seq
        WHERE excluded.updated_at > sync_icons.updated_at`,
     );
 
@@ -424,14 +595,15 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
     const upsertTagStickyExclusion = stmts.prepare<
       [string, string, string | null, string, string | null, number, string]
     >(
-      `INSERT INTO sync_tag_sticky_exclusions (uuid, user_id, tag_uuid, app_name, project, deleted, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO sync_tag_sticky_exclusions (uuid, user_id, tag_uuid, app_name, project, deleted, updated_at, seq)
+       VALUES (?, ?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(seq), 0) + 1 FROM sync_tag_sticky_exclusions))
        ON CONFLICT(uuid) DO UPDATE SET
          tag_uuid = excluded.tag_uuid,
          app_name = excluded.app_name,
          project = excluded.project,
          deleted = excluded.deleted,
-         updated_at = excluded.updated_at
+         updated_at = excluded.updated_at,
+             seq = excluded.seq
        WHERE sync_tag_sticky_exclusions.user_id = excluded.user_id
          AND excluded.updated_at > sync_tag_sticky_exclusions.updated_at`,
     );
@@ -440,13 +612,14 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
     const upsertTagStickyProjectApp = stmts.prepare<
       [string, string, string | null, string, number, string]
     >(
-      `INSERT INTO sync_tag_sticky_project_apps (uuid, user_id, tag_uuid, app_name, deleted, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?)
+      `INSERT INTO sync_tag_sticky_project_apps (uuid, user_id, tag_uuid, app_name, deleted, updated_at, seq)
+       VALUES (?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(seq), 0) + 1 FROM sync_tag_sticky_project_apps))
        ON CONFLICT(uuid) DO UPDATE SET
          tag_uuid = excluded.tag_uuid,
          app_name = excluded.app_name,
          deleted = excluded.deleted,
-         updated_at = excluded.updated_at
+         updated_at = excluded.updated_at,
+             seq = excluded.seq
        WHERE sync_tag_sticky_project_apps.user_id = excluded.user_id
          AND excluded.updated_at > sync_tag_sticky_project_apps.updated_at`,
     );
@@ -455,14 +628,15 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
     const upsertTagStickySubprojectScope = stmts.prepare<
       [string, string, string | null, string, string, number, string]
     >(
-      `INSERT INTO sync_tag_sticky_subproject_scopes (uuid, user_id, tag_uuid, app_name, project, deleted, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO sync_tag_sticky_subproject_scopes (uuid, user_id, tag_uuid, app_name, project, deleted, updated_at, seq)
+       VALUES (?, ?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(seq), 0) + 1 FROM sync_tag_sticky_subproject_scopes))
        ON CONFLICT(uuid) DO UPDATE SET
          tag_uuid = excluded.tag_uuid,
          app_name = excluded.app_name,
          project = excluded.project,
          deleted = excluded.deleted,
-         updated_at = excluded.updated_at
+         updated_at = excluded.updated_at,
+             seq = excluded.seq
        WHERE sync_tag_sticky_subproject_scopes.user_id = excluded.user_id
          AND excluded.updated_at > sync_tag_sticky_subproject_scopes.updated_at`,
     );
@@ -488,8 +662,8 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
         string,
       ]
     >(
-      `INSERT INTO sync_media_links (uuid, user_id, app_name, project, sub_project, url, kind, first_seen, last_seen, deleted, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO sync_media_links (uuid, user_id, app_name, project, sub_project, url, kind, first_seen, last_seen, deleted, updated_at, seq)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(seq), 0) + 1 FROM sync_media_links))
        ON CONFLICT(uuid) DO UPDATE SET
          app_name = excluded.app_name,
          project = excluded.project,
@@ -499,7 +673,8 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
          first_seen = excluded.first_seen,
          last_seen = excluded.last_seen,
          deleted = excluded.deleted,
-         updated_at = excluded.updated_at
+         updated_at = excluded.updated_at,
+             seq = excluded.seq
        WHERE sync_media_links.user_id = excluded.user_id
          AND excluded.updated_at > sync_media_links.updated_at`,
     );
@@ -520,8 +695,8 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
         string,
       ]
     >(
-      `INSERT INTO sync_app_categories (uuid, user_id, app_name, project, category_id, confidence, source, model, deleted, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO sync_app_categories (uuid, user_id, app_name, project, category_id, confidence, source, model, deleted, updated_at, seq)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(seq), 0) + 1 FROM sync_app_categories))
        ON CONFLICT(uuid) DO UPDATE SET
          app_name = excluded.app_name,
          project = excluded.project,
@@ -530,7 +705,8 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
          source = excluded.source,
          model = excluded.model,
          deleted = excluded.deleted,
-         updated_at = excluded.updated_at
+         updated_at = excluded.updated_at,
+             seq = excluded.seq
        WHERE sync_app_categories.user_id = excluded.user_id
          AND excluded.updated_at > sync_app_categories.updated_at`,
     );
@@ -572,9 +748,9 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
          end_time_of_day, start_date, end_date, tag_uuid, threshold_seconds,
          period, icon_data_url, interval_seconds, app_name, project, goal_uuid,
          goal_notify_half, goal_notify_complete, enabled, deleted,
-         last_fired_at, updated_at
+         last_fired_at, updated_at, seq
        )
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(seq), 0) + 1 FROM sync_reminders))
        ON CONFLICT(uuid) DO UPDATE SET
          title = excluded.title,
          body = excluded.body,
@@ -598,7 +774,8 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
          enabled = excluded.enabled,
          deleted = excluded.deleted,
          last_fired_at = excluded.last_fired_at,
-         updated_at = excluded.updated_at
+         updated_at = excluded.updated_at,
+             seq = excluded.seq
        WHERE sync_reminders.user_id = excluded.user_id
          AND excluded.updated_at > sync_reminders.updated_at`,
     );
@@ -622,9 +799,9 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
     >(
       `INSERT INTO sync_reminder_events (
          uuid, user_id, reminder_uuid, title, body, icon_data_url, fired_at,
-         read_at, dismissed_at, deleted, updated_at
+         read_at, dismissed_at, deleted, updated_at, seq
        )
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(seq), 0) + 1 FROM sync_reminder_events))
        ON CONFLICT(uuid) DO UPDATE SET
          reminder_uuid = excluded.reminder_uuid,
          title = excluded.title,
@@ -634,7 +811,8 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
          read_at = excluded.read_at,
          dismissed_at = excluded.dismissed_at,
          deleted = excluded.deleted,
-         updated_at = excluded.updated_at
+         updated_at = excluded.updated_at,
+             seq = excluded.seq
        WHERE sync_reminder_events.user_id = excluded.user_id
          AND excluded.updated_at > sync_reminder_events.updated_at`,
     );
@@ -642,11 +820,12 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
     const upsertEntryDismissal = stmts.prepare<
       [string, string, number, string]
     >(
-      `INSERT INTO sync_entry_dismissals (uuid, user_id, deleted, updated_at)
-       VALUES (?, ?, ?, ?)
+      `INSERT INTO sync_entry_dismissals (uuid, user_id, deleted, updated_at, seq)
+       VALUES (?, ?, ?, ?, (SELECT COALESCE(MAX(seq), 0) + 1 FROM sync_entry_dismissals))
        ON CONFLICT(uuid) DO UPDATE SET
          deleted = excluded.deleted,
-         updated_at = excluded.updated_at
+         updated_at = excluded.updated_at,
+             seq = excluded.seq
        WHERE sync_entry_dismissals.user_id = excluded.user_id
          AND excluded.updated_at > sync_entry_dismissals.updated_at`,
     );
@@ -997,109 +1176,136 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
     const hitLimitEntries = entries.length >= BATCH_SIZE;
     const nextEntryCursor = nextEntryCursorAfter(entryCursor, entries, hitLimitEntries, maxSeq);
 
-    const tags = fastify.db
-      .prepare<[string, string, number], SyncTag>(
-        `SELECT uuid, name, color, sticky, sticky_subprojects, sticky_projects, icon_data_url, parent_uuid, deleted, archived, updated_at
-         FROM sync_tags
-         WHERE user_id = ? AND updated_at > ?
-         ORDER BY updated_at ASC
-         LIMIT ?`,
-      )
-      .all(userId, cursor, BATCH_SIZE);
+    // The other tables page by seq the same way once the client sends a
+    // cursor for them (seq_cursors, 034). Their MAX(seq) is read before
+    // their rows, like entries above.
+    const seqCursors = parseSeqCursors(body.seq_cursors);
+    const seqMax = maxSeqs(fastify.db, userId);
+    // A table paged by seq stays out of the shared time cursor below.
+    const timeTyped = <T>(key: SeqTable, rows: T[]): T[] =>
+      seqCursors[key] === undefined ? rows : [];
 
-    const goals = fastify.db
-      .prepare<[string, string, number], SyncGoal>(
-        `SELECT uuid, type, app_name, tag_uuid, target_seconds, enabled, deleted, created_at, updated_at
-         FROM sync_goals
-         WHERE user_id = ? AND updated_at > ?
-         ORDER BY updated_at ASC
-         LIMIT ?`,
-      )
-      .all(userId, cursor, BATCH_SIZE);
+    const tags: SyncTag[] =
+      seqCursors.tags !== undefined
+        ? pullBySeq<SyncTag>(fastify.db, userId, "tags", seqCursors.tags)
+        : fastify.db
+        .prepare<[string, string, number], SyncTag>(
+          `SELECT uuid, name, color, sticky, sticky_subprojects, sticky_projects, icon_data_url, parent_uuid, deleted, archived, updated_at
+           FROM sync_tags
+           WHERE user_id = ? AND updated_at > ?
+           ORDER BY updated_at ASC
+           LIMIT ?`,
+        )
+        .all(userId, cursor, BATCH_SIZE);
 
-    const markers = fastify.db
-      .prepare<[string, string, number], SyncMarker>(
-        `SELECT uuid, timestamp, end_timestamp, label, color, icon, deleted, updated_at
-         FROM sync_markers
-         WHERE user_id = ? AND updated_at > ?
-         ORDER BY updated_at ASC
-         LIMIT ?`,
-      )
-      .all(userId, cursor, BATCH_SIZE);
+    const goals: SyncGoal[] =
+      seqCursors.goals !== undefined
+        ? pullBySeq<SyncGoal>(fastify.db, userId, "goals", seqCursors.goals)
+        : fastify.db
+        .prepare<[string, string, number], SyncGoal>(
+          `SELECT uuid, type, app_name, tag_uuid, target_seconds, enabled, deleted, created_at, updated_at
+           FROM sync_goals
+           WHERE user_id = ? AND updated_at > ?
+           ORDER BY updated_at ASC
+           LIMIT ?`,
+        )
+        .all(userId, cursor, BATCH_SIZE);
 
-    const notes = (() => {
-      const noteCursor = body.note_cursor;
-      if (noteCursor) {
+    const markers: SyncMarker[] =
+      seqCursors.markers !== undefined
+        ? pullBySeq<SyncMarker>(fastify.db, userId, "markers", seqCursors.markers)
+        : fastify.db
+        .prepare<[string, string, number], SyncMarker>(
+          `SELECT uuid, timestamp, end_timestamp, label, color, icon, deleted, updated_at
+           FROM sync_markers
+           WHERE user_id = ? AND updated_at > ?
+           ORDER BY updated_at ASC
+           LIMIT ?`,
+        )
+        .all(userId, cursor, BATCH_SIZE);
+
+    const notes: SyncNote[] =
+      seqCursors.notes !== undefined
+        ? pullBySeq<SyncNote>(fastify.db, userId, "notes", seqCursors.notes)
+        : (() => {
+        const noteCursor = body.note_cursor;
+        if (noteCursor) {
+          return fastify.db
+            .prepare<[string, string, string, string, number], SyncNote>(
+              `SELECT uuid, title, body, timestamp, end_timestamp, marker_uuid,
+                      folder_uuid, pinned, deleted, updated_at
+                 FROM sync_notes
+                WHERE user_id = ?
+                  AND (updated_at > ? OR (updated_at = ? AND uuid > ?))
+                ORDER BY updated_at ASC, uuid ASC
+                LIMIT ?`,
+            )
+            .all(
+              userId,
+              noteCursor.updated_at,
+              noteCursor.updated_at,
+              noteCursor.key,
+              BATCH_SIZE,
+            );
+        }
         return fastify.db
-          .prepare<[string, string, string, string, number], SyncNote>(
+          .prepare<[string, string, number], SyncNote>(
             `SELECT uuid, title, body, timestamp, end_timestamp, marker_uuid,
                     folder_uuid, pinned, deleted, updated_at
                FROM sync_notes
-              WHERE user_id = ?
-                AND (updated_at > ? OR (updated_at = ? AND uuid > ?))
+              WHERE user_id = ? AND updated_at > ?
               ORDER BY updated_at ASC, uuid ASC
               LIMIT ?`,
           )
-          .all(
-            userId,
-            noteCursor.updated_at,
-            noteCursor.updated_at,
-            noteCursor.key,
-            BATCH_SIZE,
-          );
-      }
-      return fastify.db
-        .prepare<[string, string, number], SyncNote>(
-          `SELECT uuid, title, body, timestamp, end_timestamp, marker_uuid,
-                  folder_uuid, pinned, deleted, updated_at
-             FROM sync_notes
-            WHERE user_id = ? AND updated_at > ?
-            ORDER BY updated_at ASC, uuid ASC
-            LIMIT ?`,
-        )
-        .all(userId, cursor, BATCH_SIZE);
-    })();
+          .all(userId, cursor, BATCH_SIZE);
+      })();
 
-    const noteFolders = (() => {
-      const noteFolderCursor = body.note_folder_cursor;
-      if (noteFolderCursor) {
+    const noteFolders: SyncNoteFolder[] =
+      seqCursors.note_folders !== undefined
+        ? pullBySeq<SyncNoteFolder>(fastify.db, userId, "note_folders", seqCursors.note_folders)
+        : (() => {
+        const noteFolderCursor = body.note_folder_cursor;
+        if (noteFolderCursor) {
+          return fastify.db
+            .prepare<[string, string, string, string, number], SyncNoteFolder>(
+              `SELECT uuid, name, parent_uuid, color, deleted, updated_at
+                 FROM sync_note_folders
+                WHERE user_id = ?
+                  AND (updated_at > ? OR (updated_at = ? AND uuid > ?))
+                ORDER BY updated_at ASC, uuid ASC
+                LIMIT ?`,
+            )
+            .all(
+              userId,
+              noteFolderCursor.updated_at,
+              noteFolderCursor.updated_at,
+              noteFolderCursor.key,
+              BATCH_SIZE,
+            );
+        }
         return fastify.db
-          .prepare<[string, string, string, string, number], SyncNoteFolder>(
+          .prepare<[string, string, number], SyncNoteFolder>(
             `SELECT uuid, name, parent_uuid, color, deleted, updated_at
                FROM sync_note_folders
-              WHERE user_id = ?
-                AND (updated_at > ? OR (updated_at = ? AND uuid > ?))
+              WHERE user_id = ? AND updated_at > ?
               ORDER BY updated_at ASC, uuid ASC
               LIMIT ?`,
           )
-          .all(
-            userId,
-            noteFolderCursor.updated_at,
-            noteFolderCursor.updated_at,
-            noteFolderCursor.key,
-            BATCH_SIZE,
-          );
-      }
-      return fastify.db
-        .prepare<[string, string, number], SyncNoteFolder>(
-          `SELECT uuid, name, parent_uuid, color, deleted, updated_at
-             FROM sync_note_folders
-            WHERE user_id = ? AND updated_at > ?
-            ORDER BY updated_at ASC, uuid ASC
-            LIMIT ?`,
+          .all(userId, cursor, BATCH_SIZE);
+      })();
+
+    const achievements: SyncGoalAchievement[] =
+      seqCursors.achievements !== undefined
+        ? pullBySeq<SyncGoalAchievement>(fastify.db, userId, "achievements", seqCursors.achievements)
+        : fastify.db
+        .prepare<[string, string, number], SyncGoalAchievement>(
+          `SELECT uuid, goal_uuid, goal_snapshot, date, achieved_at, current_seconds, deleted, updated_at
+           FROM sync_goal_achievements
+           WHERE user_id = ? AND updated_at > ?
+           ORDER BY updated_at ASC
+           LIMIT ?`,
         )
         .all(userId, cursor, BATCH_SIZE);
-    })();
-
-    const achievements = fastify.db
-      .prepare<[string, string, number], SyncGoalAchievement>(
-        `SELECT uuid, goal_uuid, goal_snapshot, date, achieved_at, current_seconds, deleted, updated_at
-         FROM sync_goal_achievements
-         WHERE user_id = ? AND updated_at > ?
-         ORDER BY updated_at ASC
-         LIMIT ?`,
-      )
-      .all(userId, cursor, BATCH_SIZE);
 
     // Icons use a compound (updated_at, name_hash) cursor instead of the
     // shared time-only cursor. A single client push of N icons stamps every
@@ -1112,31 +1318,34 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
     // pull after upgrade) we fall back to the shared time-only cursor for
     // a clean transition — that path matches the legacy behavior exactly.
     const iconCursor = body.icon_cursor;
-    const icons = iconCursor
-      ? fastify.db
-          .prepare<[string, string, string, string], SyncIcon>(
-            `SELECT name_hash, app_name, platform, data_url, dominant_color, updated_at
-             FROM sync_icons
-             WHERE user_id = ?
-               AND (updated_at > ? OR (updated_at = ? AND name_hash > ?))
-             ORDER BY updated_at ASC, name_hash ASC
-             LIMIT ${ICON_LIMIT}`,
-          )
-          .all(
-            userId,
-            iconCursor.updated_at,
-            iconCursor.updated_at,
-            iconCursor.key,
-          )
-      : fastify.db
-          .prepare<[string, string], SyncIcon>(
-            `SELECT name_hash, app_name, platform, data_url, dominant_color, updated_at
-             FROM sync_icons
-             WHERE user_id = ? AND updated_at > ?
-             ORDER BY updated_at ASC, name_hash ASC
-             LIMIT ${ICON_LIMIT}`,
-          )
-          .all(userId, cursor);
+    const icons: SyncIcon[] =
+      seqCursors.icons !== undefined
+        ? pullBySeq<SyncIcon>(fastify.db, userId, "icons", seqCursors.icons)
+        : iconCursor
+        ? fastify.db
+            .prepare<[string, string, string, string], SyncIcon>(
+              `SELECT name_hash, app_name, platform, data_url, dominant_color, updated_at
+               FROM sync_icons
+               WHERE user_id = ?
+                 AND (updated_at > ? OR (updated_at = ? AND name_hash > ?))
+               ORDER BY updated_at ASC, name_hash ASC
+               LIMIT ${ICON_LIMIT}`,
+            )
+            .all(
+              userId,
+              iconCursor.updated_at,
+              iconCursor.updated_at,
+              iconCursor.key,
+            )
+        : fastify.db
+            .prepare<[string, string], SyncIcon>(
+              `SELECT name_hash, app_name, platform, data_url, dominant_color, updated_at
+               FROM sync_icons
+               WHERE user_id = ? AND updated_at > ?
+               ORDER BY updated_at ASC, name_hash ASC
+               LIMIT ${ICON_LIMIT}`,
+            )
+            .all(userId, cursor);
 
     // Overrides are intentionally returned in full rather than cursor-
     // filtered: the set is bounded by OVERRIDE_PULL_LIMIT and the client
@@ -1190,100 +1399,109 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
     // rows at the boundary. Tiebreaker is `uuid`. Legacy fallback uses the
     // shared time cursor.
     const tseCursor = body.tag_sticky_exclusion_cursor;
-    const tagStickyExclusions = tseCursor
-      ? fastify.db
-          .prepare<
-            [string, string, string, string, number],
-            SyncTagStickyExclusion
-          >(
-            `SELECT uuid, tag_uuid, app_name, project, deleted, updated_at
-             FROM sync_tag_sticky_exclusions
-             WHERE user_id = ?
-               AND (updated_at > ? OR (updated_at = ? AND uuid > ?))
-             ORDER BY updated_at ASC, uuid ASC
-             LIMIT ?`,
-          )
-          .all(
-            userId,
-            tseCursor.updated_at,
-            tseCursor.updated_at,
-            tseCursor.key,
-            BATCH_SIZE,
-          )
-      : fastify.db
-          .prepare<[string, string, number], SyncTagStickyExclusion>(
-            `SELECT uuid, tag_uuid, app_name, project, deleted, updated_at
-             FROM sync_tag_sticky_exclusions
-             WHERE user_id = ? AND updated_at > ?
-             ORDER BY updated_at ASC, uuid ASC
-             LIMIT ?`,
-          )
-          .all(userId, cursor, BATCH_SIZE);
+    const tagStickyExclusions: SyncTagStickyExclusion[] =
+      seqCursors.tag_sticky_exclusions !== undefined
+        ? pullBySeq<SyncTagStickyExclusion>(fastify.db, userId, "tag_sticky_exclusions", seqCursors.tag_sticky_exclusions)
+        : tseCursor
+        ? fastify.db
+            .prepare<
+              [string, string, string, string, number],
+              SyncTagStickyExclusion
+            >(
+              `SELECT uuid, tag_uuid, app_name, project, deleted, updated_at
+               FROM sync_tag_sticky_exclusions
+               WHERE user_id = ?
+                 AND (updated_at > ? OR (updated_at = ? AND uuid > ?))
+               ORDER BY updated_at ASC, uuid ASC
+               LIMIT ?`,
+            )
+            .all(
+              userId,
+              tseCursor.updated_at,
+              tseCursor.updated_at,
+              tseCursor.key,
+              BATCH_SIZE,
+            )
+        : fastify.db
+            .prepare<[string, string, number], SyncTagStickyExclusion>(
+              `SELECT uuid, tag_uuid, app_name, project, deleted, updated_at
+               FROM sync_tag_sticky_exclusions
+               WHERE user_id = ? AND updated_at > ?
+               ORDER BY updated_at ASC, uuid ASC
+               LIMIT ?`,
+            )
+            .all(userId, cursor, BATCH_SIZE);
 
     // Per-app allowlist for sticky_projects (011). Same compound-cursor
     // pattern as sticky exclusions — bulk re-push can cluster timestamps.
     const spaCursor = body.tag_sticky_project_app_cursor;
-    const tagStickyProjectApps = spaCursor
-      ? fastify.db
-          .prepare<
-            [string, string, string, string, number],
-            SyncTagStickyProjectApp
-          >(
-            `SELECT uuid, tag_uuid, app_name, deleted, updated_at
-             FROM sync_tag_sticky_project_apps
-             WHERE user_id = ?
-               AND (updated_at > ? OR (updated_at = ? AND uuid > ?))
-             ORDER BY updated_at ASC, uuid ASC
-             LIMIT ?`,
-          )
-          .all(
-            userId,
-            spaCursor.updated_at,
-            spaCursor.updated_at,
-            spaCursor.key,
-            BATCH_SIZE,
-          )
-      : fastify.db
-          .prepare<[string, string, number], SyncTagStickyProjectApp>(
-            `SELECT uuid, tag_uuid, app_name, deleted, updated_at
-             FROM sync_tag_sticky_project_apps
-             WHERE user_id = ? AND updated_at > ?
-             ORDER BY updated_at ASC, uuid ASC
-             LIMIT ?`,
-          )
-          .all(userId, cursor, BATCH_SIZE);
+    const tagStickyProjectApps: SyncTagStickyProjectApp[] =
+      seqCursors.tag_sticky_project_apps !== undefined
+        ? pullBySeq<SyncTagStickyProjectApp>(fastify.db, userId, "tag_sticky_project_apps", seqCursors.tag_sticky_project_apps)
+        : spaCursor
+        ? fastify.db
+            .prepare<
+              [string, string, string, string, number],
+              SyncTagStickyProjectApp
+            >(
+              `SELECT uuid, tag_uuid, app_name, deleted, updated_at
+               FROM sync_tag_sticky_project_apps
+               WHERE user_id = ?
+                 AND (updated_at > ? OR (updated_at = ? AND uuid > ?))
+               ORDER BY updated_at ASC, uuid ASC
+               LIMIT ?`,
+            )
+            .all(
+              userId,
+              spaCursor.updated_at,
+              spaCursor.updated_at,
+              spaCursor.key,
+              BATCH_SIZE,
+            )
+        : fastify.db
+            .prepare<[string, string, number], SyncTagStickyProjectApp>(
+              `SELECT uuid, tag_uuid, app_name, deleted, updated_at
+               FROM sync_tag_sticky_project_apps
+               WHERE user_id = ? AND updated_at > ?
+               ORDER BY updated_at ASC, uuid ASC
+               LIMIT ?`,
+            )
+            .all(userId, cursor, BATCH_SIZE);
 
     // Per-breakdown allowlist for sticky_subprojects (011).
     const sssCursor = body.tag_sticky_subproject_scope_cursor;
-    const tagStickySubprojectScopes = sssCursor
-      ? fastify.db
-          .prepare<
-            [string, string, string, string, number],
-            SyncTagStickySubprojectScope
-          >(
-            `SELECT uuid, tag_uuid, app_name, project, deleted, updated_at
-             FROM sync_tag_sticky_subproject_scopes
-             WHERE user_id = ?
-               AND (updated_at > ? OR (updated_at = ? AND uuid > ?))
-             ORDER BY updated_at ASC, uuid ASC
-             LIMIT ?`,
-          )
-          .all(
-            userId,
-            sssCursor.updated_at,
-            sssCursor.updated_at,
-            sssCursor.key,
-            BATCH_SIZE,
-          )
-      : fastify.db
-          .prepare<[string, string, number], SyncTagStickySubprojectScope>(
-            `SELECT uuid, tag_uuid, app_name, project, deleted, updated_at
-             FROM sync_tag_sticky_subproject_scopes
-             WHERE user_id = ? AND updated_at > ?
-             ORDER BY updated_at ASC, uuid ASC
-             LIMIT ?`,
-          )
-          .all(userId, cursor, BATCH_SIZE);
+    const tagStickySubprojectScopes: SyncTagStickySubprojectScope[] =
+      seqCursors.tag_sticky_subproject_scopes !== undefined
+        ? pullBySeq<SyncTagStickySubprojectScope>(fastify.db, userId, "tag_sticky_subproject_scopes", seqCursors.tag_sticky_subproject_scopes)
+        : sssCursor
+        ? fastify.db
+            .prepare<
+              [string, string, string, string, number],
+              SyncTagStickySubprojectScope
+            >(
+              `SELECT uuid, tag_uuid, app_name, project, deleted, updated_at
+               FROM sync_tag_sticky_subproject_scopes
+               WHERE user_id = ?
+                 AND (updated_at > ? OR (updated_at = ? AND uuid > ?))
+               ORDER BY updated_at ASC, uuid ASC
+               LIMIT ?`,
+            )
+            .all(
+              userId,
+              sssCursor.updated_at,
+              sssCursor.updated_at,
+              sssCursor.key,
+              BATCH_SIZE,
+            )
+        : fastify.db
+            .prepare<[string, string, number], SyncTagStickySubprojectScope>(
+              `SELECT uuid, tag_uuid, app_name, project, deleted, updated_at
+               FROM sync_tag_sticky_subproject_scopes
+               WHERE user_id = ? AND updated_at > ?
+               ORDER BY updated_at ASC, uuid ASC
+               LIMIT ?`,
+            )
+            .all(userId, cursor, BATCH_SIZE);
 
     // Captured media URLs (007). Same compound-cursor treatment as
     // sticky exclusions — a fresh capture-enabled device may push its
@@ -1291,63 +1509,69 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
     // `now`. Tiebreaker is `uuid`. Legacy fallback uses the shared
     // time cursor for clients that pre-date the compound cursor.
     const mediaLinkCursor = body.media_link_cursor;
-    const mediaLinks = mediaLinkCursor
-      ? fastify.db
-          .prepare<[string, string, string, string, number], SyncMediaLink>(
-            `SELECT uuid, app_name, project, sub_project, url, kind, first_seen, last_seen, deleted, updated_at
-             FROM sync_media_links
-             WHERE user_id = ?
-               AND (updated_at > ? OR (updated_at = ? AND uuid > ?))
-             ORDER BY updated_at ASC, uuid ASC
-             LIMIT ?`,
-          )
-          .all(
-            userId,
-            mediaLinkCursor.updated_at,
-            mediaLinkCursor.updated_at,
-            mediaLinkCursor.key,
-            BATCH_SIZE,
-          )
-      : fastify.db
-          .prepare<[string, string, number], SyncMediaLink>(
-            `SELECT uuid, app_name, project, sub_project, url, kind, first_seen, last_seen, deleted, updated_at
-             FROM sync_media_links
-             WHERE user_id = ? AND updated_at > ?
-             ORDER BY updated_at ASC, uuid ASC
-             LIMIT ?`,
-          )
-          .all(userId, cursor, BATCH_SIZE);
+    const mediaLinks: SyncMediaLink[] =
+      seqCursors.media_links !== undefined
+        ? pullBySeq<SyncMediaLink>(fastify.db, userId, "media_links", seqCursors.media_links)
+        : mediaLinkCursor
+        ? fastify.db
+            .prepare<[string, string, string, string, number], SyncMediaLink>(
+              `SELECT uuid, app_name, project, sub_project, url, kind, first_seen, last_seen, deleted, updated_at
+               FROM sync_media_links
+               WHERE user_id = ?
+                 AND (updated_at > ? OR (updated_at = ? AND uuid > ?))
+               ORDER BY updated_at ASC, uuid ASC
+               LIMIT ?`,
+            )
+            .all(
+              userId,
+              mediaLinkCursor.updated_at,
+              mediaLinkCursor.updated_at,
+              mediaLinkCursor.key,
+              BATCH_SIZE,
+            )
+        : fastify.db
+            .prepare<[string, string, number], SyncMediaLink>(
+              `SELECT uuid, app_name, project, sub_project, url, kind, first_seen, last_seen, deleted, updated_at
+               FROM sync_media_links
+               WHERE user_id = ? AND updated_at > ?
+               ORDER BY updated_at ASC, uuid ASC
+               LIMIT ?`,
+            )
+            .all(userId, cursor, BATCH_SIZE);
 
     // Activity category assignments (030). Compound cursor on
     // (updated_at, uuid) — first enable may push the whole non-seed map
     // in one shot. Legacy fallback uses the shared time cursor.
     const appCategoryCursor = body.app_category_cursor;
-    const appCategories = appCategoryCursor
-      ? fastify.db
-          .prepare<[string, string, string, string, number], SyncAppCategory>(
-            `SELECT uuid, app_name, project, category_id, confidence, source, model, deleted, updated_at
-             FROM sync_app_categories
-             WHERE user_id = ?
-               AND (updated_at > ? OR (updated_at = ? AND uuid > ?))
-             ORDER BY updated_at ASC, uuid ASC
-             LIMIT ?`,
-          )
-          .all(
-            userId,
-            appCategoryCursor.updated_at,
-            appCategoryCursor.updated_at,
-            appCategoryCursor.key,
-            BATCH_SIZE,
-          )
-      : fastify.db
-          .prepare<[string, string, number], SyncAppCategory>(
-            `SELECT uuid, app_name, project, category_id, confidence, source, model, deleted, updated_at
-             FROM sync_app_categories
-             WHERE user_id = ? AND updated_at > ?
-             ORDER BY updated_at ASC, uuid ASC
-             LIMIT ?`,
-          )
-          .all(userId, cursor, BATCH_SIZE);
+    const appCategories: SyncAppCategory[] =
+      seqCursors.app_categories !== undefined
+        ? pullBySeq<SyncAppCategory>(fastify.db, userId, "app_categories", seqCursors.app_categories)
+        : appCategoryCursor
+        ? fastify.db
+            .prepare<[string, string, string, string, number], SyncAppCategory>(
+              `SELECT uuid, app_name, project, category_id, confidence, source, model, deleted, updated_at
+               FROM sync_app_categories
+               WHERE user_id = ?
+                 AND (updated_at > ? OR (updated_at = ? AND uuid > ?))
+               ORDER BY updated_at ASC, uuid ASC
+               LIMIT ?`,
+            )
+            .all(
+              userId,
+              appCategoryCursor.updated_at,
+              appCategoryCursor.updated_at,
+              appCategoryCursor.key,
+              BATCH_SIZE,
+            )
+        : fastify.db
+            .prepare<[string, string, number], SyncAppCategory>(
+              `SELECT uuid, app_name, project, category_id, confidence, source, model, deleted, updated_at
+               FROM sync_app_categories
+               WHERE user_id = ? AND updated_at > ?
+               ORDER BY updated_at ASC, uuid ASC
+               LIMIT ?`,
+            )
+            .all(userId, cursor, BATCH_SIZE);
 
     // Custom reminders (008). Same compound-cursor hazard as media
     // links — a user creating several reminders in quick succession
@@ -1355,105 +1579,114 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
     // fallback uses the shared time cursor for clients that pre-date
     // the compound cursor.
     const reminderCursor = body.reminder_cursor;
-    const reminders = reminderCursor
-      ? fastify.db
-          .prepare<[string, string, string, string, number], SyncReminder>(
-            `SELECT uuid, title, body, kind, fire_at, weekdays, time_of_day,
-                    end_time_of_day, start_date, end_date, tag_uuid, threshold_seconds,
-                    period, icon_data_url, interval_seconds, app_name, project, goal_uuid,
-                    goal_notify_half, goal_notify_complete, enabled, deleted,
-                    last_fired_at, updated_at
-             FROM sync_reminders
-             WHERE user_id = ?
-               AND (updated_at > ? OR (updated_at = ? AND uuid > ?))
-             ORDER BY updated_at ASC, uuid ASC
-             LIMIT ?`,
-          )
-          .all(
-            userId,
-            reminderCursor.updated_at,
-            reminderCursor.updated_at,
-            reminderCursor.key,
-            BATCH_SIZE,
-          )
-      : fastify.db
-          .prepare<[string, string, number], SyncReminder>(
-            `SELECT uuid, title, body, kind, fire_at, weekdays, time_of_day,
-                    end_time_of_day, start_date, end_date, tag_uuid, threshold_seconds,
-                    period, icon_data_url, interval_seconds, app_name, project, goal_uuid,
-                    goal_notify_half, goal_notify_complete, enabled, deleted,
-                    last_fired_at, updated_at
-             FROM sync_reminders
-             WHERE user_id = ? AND updated_at > ?
-             ORDER BY updated_at ASC, uuid ASC
-             LIMIT ?`,
-          )
-          .all(userId, cursor, BATCH_SIZE);
+    const reminders: SyncReminder[] =
+      seqCursors.reminders !== undefined
+        ? pullBySeq<SyncReminder>(fastify.db, userId, "reminders", seqCursors.reminders)
+        : reminderCursor
+        ? fastify.db
+            .prepare<[string, string, string, string, number], SyncReminder>(
+              `SELECT uuid, title, body, kind, fire_at, weekdays, time_of_day,
+                      end_time_of_day, start_date, end_date, tag_uuid, threshold_seconds,
+                      period, icon_data_url, interval_seconds, app_name, project, goal_uuid,
+                      goal_notify_half, goal_notify_complete, enabled, deleted,
+                      last_fired_at, updated_at
+               FROM sync_reminders
+               WHERE user_id = ?
+                 AND (updated_at > ? OR (updated_at = ? AND uuid > ?))
+               ORDER BY updated_at ASC, uuid ASC
+               LIMIT ?`,
+            )
+            .all(
+              userId,
+              reminderCursor.updated_at,
+              reminderCursor.updated_at,
+              reminderCursor.key,
+              BATCH_SIZE,
+            )
+        : fastify.db
+            .prepare<[string, string, number], SyncReminder>(
+              `SELECT uuid, title, body, kind, fire_at, weekdays, time_of_day,
+                      end_time_of_day, start_date, end_date, tag_uuid, threshold_seconds,
+                      period, icon_data_url, interval_seconds, app_name, project, goal_uuid,
+                      goal_notify_half, goal_notify_complete, enabled, deleted,
+                      last_fired_at, updated_at
+               FROM sync_reminders
+               WHERE user_id = ? AND updated_at > ?
+               ORDER BY updated_at ASC, uuid ASC
+               LIMIT ?`,
+            )
+            .all(userId, cursor, BATCH_SIZE);
 
     // Reminder notification history (014). Compound cursor matches
     // reminders: bulk event inserts commonly share an updated_at timestamp.
     const reminderEventCursor = body.reminder_event_cursor;
-    const reminderEvents = reminderEventCursor
-      ? fastify.db
-          .prepare<[string, string, string, string, number], SyncReminderEvent>(
-            `SELECT uuid, reminder_uuid, title, body, icon_data_url, fired_at,
-                    read_at, dismissed_at, deleted, updated_at
-             FROM sync_reminder_events
-             WHERE user_id = ?
-               AND (updated_at > ? OR (updated_at = ? AND uuid > ?))
-             ORDER BY updated_at ASC, uuid ASC
-             LIMIT ?`,
-          )
-          .all(
-            userId,
-            reminderEventCursor.updated_at,
-            reminderEventCursor.updated_at,
-            reminderEventCursor.key,
-            BATCH_SIZE,
-          )
-      : fastify.db
-          .prepare<[string, string, number], SyncReminderEvent>(
-            `SELECT uuid, reminder_uuid, title, body, icon_data_url, fired_at,
-                    read_at, dismissed_at, deleted, updated_at
-             FROM sync_reminder_events
-             WHERE user_id = ? AND updated_at > ?
-             ORDER BY updated_at ASC, uuid ASC
-             LIMIT ?`,
-          )
-          .all(userId, cursor, BATCH_SIZE);
+    const reminderEvents: SyncReminderEvent[] =
+      seqCursors.reminder_events !== undefined
+        ? pullBySeq<SyncReminderEvent>(fastify.db, userId, "reminder_events", seqCursors.reminder_events)
+        : reminderEventCursor
+        ? fastify.db
+            .prepare<[string, string, string, string, number], SyncReminderEvent>(
+              `SELECT uuid, reminder_uuid, title, body, icon_data_url, fired_at,
+                      read_at, dismissed_at, deleted, updated_at
+               FROM sync_reminder_events
+               WHERE user_id = ?
+                 AND (updated_at > ? OR (updated_at = ? AND uuid > ?))
+               ORDER BY updated_at ASC, uuid ASC
+               LIMIT ?`,
+            )
+            .all(
+              userId,
+              reminderEventCursor.updated_at,
+              reminderEventCursor.updated_at,
+              reminderEventCursor.key,
+              BATCH_SIZE,
+            )
+        : fastify.db
+            .prepare<[string, string, number], SyncReminderEvent>(
+              `SELECT uuid, reminder_uuid, title, body, icon_data_url, fired_at,
+                      read_at, dismissed_at, deleted, updated_at
+               FROM sync_reminder_events
+               WHERE user_id = ? AND updated_at > ?
+               ORDER BY updated_at ASC, uuid ASC
+               LIMIT ?`,
+            )
+            .all(userId, cursor, BATCH_SIZE);
 
     // Dispute-time-block tombstones (012). Compound cursor — a single
     // dismiss can tombstone several entry UUIDs at the same updated_at.
     const entryDismissalCursor = body.entry_dismissal_cursor;
-    const entryDismissals = entryDismissalCursor
-      ? fastify.db
-          .prepare<
-            [string, string, string, string, number],
-            SyncEntryDismissal
-          >(
-            `SELECT uuid, deleted, updated_at
-             FROM sync_entry_dismissals
-             WHERE user_id = ?
-               AND (updated_at > ? OR (updated_at = ? AND uuid > ?))
-             ORDER BY updated_at ASC, uuid ASC
-             LIMIT ?`,
-          )
-          .all(
-            userId,
-            entryDismissalCursor.updated_at,
-            entryDismissalCursor.updated_at,
-            entryDismissalCursor.key,
-            BATCH_SIZE,
-          )
-      : fastify.db
-          .prepare<[string, string, number], SyncEntryDismissal>(
-            `SELECT uuid, deleted, updated_at
-             FROM sync_entry_dismissals
-             WHERE user_id = ? AND updated_at > ?
-             ORDER BY updated_at ASC, uuid ASC
-             LIMIT ?`,
-          )
-          .all(userId, cursor, BATCH_SIZE);
+    const entryDismissals: SyncEntryDismissal[] =
+      seqCursors.entry_dismissals !== undefined
+        ? pullBySeq<SyncEntryDismissal>(fastify.db, userId, "entry_dismissals", seqCursors.entry_dismissals)
+        : entryDismissalCursor
+        ? fastify.db
+            .prepare<
+              [string, string, string, string, number],
+              SyncEntryDismissal
+            >(
+              `SELECT uuid, deleted, updated_at
+               FROM sync_entry_dismissals
+               WHERE user_id = ?
+                 AND (updated_at > ? OR (updated_at = ? AND uuid > ?))
+               ORDER BY updated_at ASC, uuid ASC
+               LIMIT ?`,
+            )
+            .all(
+              userId,
+              entryDismissalCursor.updated_at,
+              entryDismissalCursor.updated_at,
+              entryDismissalCursor.key,
+              BATCH_SIZE,
+            )
+        : fastify.db
+            .prepare<[string, string, number], SyncEntryDismissal>(
+              `SELECT uuid, deleted, updated_at
+               FROM sync_entry_dismissals
+               WHERE user_id = ? AND updated_at > ?
+               ORDER BY updated_at ASC, uuid ASC
+               LIMIT ?`,
+            )
+            .all(userId, cursor, BATCH_SIZE);
 
     fastify.db
       .prepare<
@@ -1469,10 +1702,10 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
     // entry cursor; the rest page entries on their own (nextEntryCursor).
     const hitLimitTimeTypes =
       (!entryCursor && hitLimitEntries) ||
-      tags.length >= BATCH_SIZE ||
-      goals.length >= BATCH_SIZE ||
-      markers.length >= BATCH_SIZE ||
-      achievements.length >= BATCH_SIZE;
+      timeTyped("tags", tags).length >= BATCH_SIZE ||
+      timeTyped("goals", goals).length >= BATCH_SIZE ||
+      timeTyped("markers", markers).length >= BATCH_SIZE ||
+      timeTyped("achievements", achievements).length >= BATCH_SIZE;
     const hitLimitIcons = icons.length >= ICON_LIMIT;
     const hitLimitSettings = settings.length >= SETTING_LIMIT;
     const hitLimitTse = tagStickyExclusions.length >= BATCH_SIZE;
@@ -1488,7 +1721,13 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
 
     let newCursor = now;
     if (hitLimitTimeTypes) {
-      const latestPerType = [entryCursor ? [] : entries, tags, goals, markers, achievements]
+      const latestPerType = [
+        entryCursor ? [] : entries,
+        timeTyped("tags", tags),
+        timeTyped("goals", goals),
+        timeTyped("markers", markers),
+        timeTyped("achievements", achievements),
+      ]
         .filter((arr) => arr.length > 0)
         .map(
           (arr) =>
@@ -1593,6 +1832,28 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
           }
         : undefined;
 
+    const nextSeq = nextSeqCursors(
+      seqCursors,
+      {
+        tags,
+        goals,
+        markers,
+        notes,
+        note_folders: noteFolders,
+        achievements,
+        icons,
+        tag_sticky_exclusions: tagStickyExclusions,
+        tag_sticky_project_apps: tagStickyProjectApps,
+        tag_sticky_subproject_scopes: tagStickySubprojectScopes,
+        media_links: mediaLinks,
+        app_categories: appCategories,
+        reminders,
+        reminder_events: reminderEvents,
+        entry_dismissals: entryDismissals,
+      } as Record<SeqTable, Array<{ seq?: number | null }>>,
+      seqMax,
+    );
+
     const response: PullResponse = {
       entries,
       tags,
@@ -1614,9 +1875,11 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
       entry_dismissals: entryDismissals,
       cursor: newCursor,
       entry_cursor: nextEntryCursor,
+      seq_cursors: nextSeq.cursors,
       has_more:
         hitLimitTimeTypes ||
         hitLimitEntries ||
+        nextSeq.hitLimit ||
         hitLimitIcons ||
         hitLimitSettings ||
         hitLimitTse ||

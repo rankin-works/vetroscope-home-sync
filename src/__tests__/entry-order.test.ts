@@ -155,6 +155,129 @@ describe("entry pulls by save order", () => {
     expect((await pull(laptop)).json().entry_cursor).toEqual({ seq: 0 });
   });
 
+  describe("other tables pull by save order", () => {
+    const SEQ_TABLES = [
+      "tags",
+      "goals",
+      "markers",
+      "notes",
+      "note_folders",
+      "achievements",
+      "icons",
+      "tag_sticky_exclusions",
+      "tag_sticky_project_apps",
+      "tag_sticky_subproject_scopes",
+      "media_links",
+      "app_categories",
+      "reminders",
+      "reminder_events",
+      "entry_dismissals",
+    ];
+    const zeroCursors = () => Object.fromEntries(SEQ_TABLES.map((t) => [t, 0]));
+    const otherRows = (updatedAt: string) => ({
+      tags: [
+        {
+          uuid: randomUUID(),
+          name: "t",
+          color: "#111111",
+          sticky: 0,
+          deleted: 0,
+          updated_at: updatedAt,
+        },
+      ],
+      notes: [
+        {
+          uuid: randomUUID(),
+          title: "n",
+          body: "b",
+          timestamp: null,
+          end_timestamp: null,
+          marker_uuid: null,
+          deleted: 0,
+          updated_at: updatedAt,
+        },
+      ],
+      entry_dismissals: [
+        { uuid: randomUUID(), deleted: 0, updated_at: updatedAt },
+      ],
+    });
+    const uuidsOf = (
+      body: Record<string, Array<{ uuid: string }>>,
+      key: string,
+    ) => body[key]!.map((r) => r.uuid);
+
+    it("still delivers a dismissal, tag or note stamped before another device's caught-up pull", async () => {
+      const first = otherRows(iso());
+      expect(
+        (await post("/sync/push", first, desktop.accessToken)).statusCode,
+      ).toBe(200);
+      const caughtUp = (
+        await pull(laptop, { seq_cursors: zeroCursors() })
+      ).json();
+      for (const key of ["tags", "notes", "entry_dismissals"] as const) {
+        expect(uuidsOf(caughtUp, key)).toEqual([first[key][0]!.uuid]);
+      }
+      expect(Object.keys(caughtUp.seq_cursors).sort()).toEqual(
+        [...SEQ_TABLES].sort(),
+      );
+
+      // Stamped by the desktop's clock before the laptop's pull, saved after.
+      const late = otherRows(iso(-5_000));
+      expect(
+        (await post("/sync/push", late, desktop.accessToken)).statusCode,
+      ).toBe(200);
+      const next = (
+        await pull(laptop, {
+          cursor: caughtUp.cursor,
+          seq_cursors: caughtUp.seq_cursors,
+        })
+      ).json();
+      for (const key of ["tags", "notes", "entry_dismissals"] as const) {
+        expect(uuidsOf(next, key)).toEqual([late[key][0]!.uuid]);
+      }
+      // Without seq cursors the time cursor is past them.
+      const legacy = (await pull(laptop, { cursor: caughtUp.cursor })).json();
+      expect(legacy.entry_dismissals).toEqual([]);
+      expect(legacy.notes).toEqual([]);
+    });
+
+    it("pages a table larger than one pull without skipping a row", async () => {
+      const dismissals = Array.from({ length: 700 }, () => ({
+        uuid: randomUUID(),
+        deleted: 0,
+        updated_at: iso(-1_000),
+      }));
+      expect(
+        (
+          await post(
+            "/sync/push",
+            { entry_dismissals: dismissals.slice(0, 500) },
+            desktop.accessToken,
+          )
+        ).statusCode,
+      ).toBe(200);
+      expect(
+        (
+          await post(
+            "/sync/push",
+            { entry_dismissals: dismissals.slice(500) },
+            desktop.accessToken,
+          )
+        ).statusCode,
+      ).toBe(200);
+      const seen: string[] = [];
+      let seqCursors: unknown = zeroCursors();
+      for (let page = 0; page < 5; page++) {
+        const body = (await pull(laptop, { seq_cursors: seqCursors })).json();
+        seen.push(...uuidsOf(body, "entry_dismissals"));
+        seqCursors = body.seq_cursors;
+        if (!body.has_more) break;
+      }
+      expect(seen).toHaveLength(700);
+      expect(new Set(seen)).toEqual(new Set(dismissals.map((d) => d.uuid)));
+    });
+  });
+
   describe("moving a session to the desktop's own device id", () => {
     const refresh = (s: Session, extra: Record<string, unknown> = {}) =>
       post("/auth/refresh", { refresh_token: s.refreshToken, ...extra });

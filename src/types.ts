@@ -419,6 +419,10 @@ export interface PullPayload {
   // Entries' own cursor. Clients that send it page entries separately
   // from `cursor`; older clients omit it and entries follow `cursor`.
   entry_cursor?: EntryCursor | null;
+  // Per-table seq cursors for the other pulled tables (034), keyed by
+  // their field in PullResponse. A table without one pages by `cursor` /
+  // its compound cursor as before.
+  seq_cursors?: Record<string, number> | null;
   // Per-type compound cursors. Sent by clients that understand the
   // compound-cursor protocol (v0.1.0-beta.4+). Servers ignore unknown
   // fields, so older servers reject nothing.
@@ -494,6 +498,8 @@ export interface PullResponse {
   // Next entry cursor (032). Always sent; clients that don't know it
   // ignore it.
   entry_cursor?: EntryCursor;
+  // Next seq cursor for each table the client sent one for.
+  seq_cursors?: Record<string, number>;
   has_more?: boolean;
   // Set by v0.1.0-beta.4+ servers when icons / settings were paginated.
   // The client round-trips them on the next pull. Absent when the
