@@ -50,8 +50,15 @@ import { SERVER_MIN_CLIENT_VERSION } from "./server-info.js";
 
 const BATCH_SIZE = 500;
 const ICON_LIMIT = 50;
+const OVERRIDE_PULL_LIMIT = 500;
+// Settings are a small allowlist (see SYNCED_SETTING_KEYS) so the legacy
+// behavior was "no LIMIT" — it always fit in one response. With the
+// compound cursor we still cap to a deterministic page size so a future
+// allowlist expansion can't turn this into an unbounded scan, but the cap
+// is comfortable above the current keyset.
+const SETTING_LIMIT = 100;
 
-/** Pulled tables that page by `seq` (034) once the client sends a cursor
+/** Pulled tables that page by `seq` (034 / 035) once the client sends a cursor
  *  for them in `seq_cursors`, keyed by their field in the pull response.
  *  Columns match each table's time-cursor query in /sync/pull. */
 const SEQ_TABLES = {
@@ -129,6 +136,19 @@ const SEQ_TABLES = {
     table: "sync_entry_dismissals",
     columns: "uuid, deleted, updated_at",
     limit: BATCH_SIZE,
+  },
+  // 035. A client without a cursor for these still gets the whole set
+  // every pull (their old behaviour).
+  overrides: {
+    table: "sync_overrides",
+    columns:
+      "name_hash, app_name, display_name, color, icon_data_url, updated_at",
+    limit: OVERRIDE_PULL_LIMIT,
+  },
+  settings: {
+    table: "sync_settings",
+    columns: "key, value, updated_at",
+    limit: SETTING_LIMIT,
   },
 } as const;
 export type SeqTable = keyof typeof SEQ_TABLES;
@@ -240,13 +260,6 @@ export function nextEntryCursorAfter(
   }
   return { seq: Math.max(maxSeq, bySeq ? current.seq : 0) };
 }
-const OVERRIDE_PULL_LIMIT = 500;
-// Settings are a small allowlist (see SYNCED_SETTING_KEYS) so the legacy
-// behavior was "no LIMIT" — it always fit in one response. With the
-// compound cursor we still cap to a deterministic page size so a future
-// allowlist expansion can't turn this into an unbounded scan, but the cap
-// is comfortable above the current keyset.
-const SETTING_LIMIT = 100;
 
 // Allowlist of sync-eligible setting keys. The client has historically
 // attempted to push additional keys; rejecting unknown ones keeps the
@@ -403,7 +416,7 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
          deleted = excluded.deleted,
          archived = excluded.archived,
          updated_at = excluded.updated_at,
-             seq = excluded.seq
+         seq = excluded.seq
        WHERE sync_tags.user_id = excluded.user_id
          AND excluded.updated_at > sync_tags.updated_at`,
     );
@@ -437,7 +450,7 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
          deleted = excluded.deleted,
          created_at = COALESCE(sync_goals.created_at, excluded.created_at),
          updated_at = excluded.updated_at,
-             seq = excluded.seq
+         seq = excluded.seq
        WHERE sync_goals.user_id = excluded.user_id
          AND excluded.updated_at > sync_goals.updated_at`,
     );
@@ -465,7 +478,7 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
          icon = excluded.icon,
          deleted = excluded.deleted,
          updated_at = excluded.updated_at,
-             seq = excluded.seq
+         seq = excluded.seq
        WHERE sync_markers.user_id = excluded.user_id
          AND excluded.updated_at > sync_markers.updated_at`,
     );
@@ -500,7 +513,7 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
          pinned = excluded.pinned,
          deleted = excluded.deleted,
          updated_at = excluded.updated_at,
-             seq = excluded.seq
+         seq = excluded.seq
        WHERE sync_notes.user_id = excluded.user_id
          AND excluded.updated_at > sync_notes.updated_at`,
     );
@@ -518,7 +531,7 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
          color = excluded.color,
          deleted = excluded.deleted,
          updated_at = excluded.updated_at,
-             seq = excluded.seq
+         seq = excluded.seq
        WHERE sync_note_folders.user_id = excluded.user_id
          AND excluded.updated_at > sync_note_folders.updated_at`,
     );
@@ -538,17 +551,18 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
          current_seconds = excluded.current_seconds,
          deleted = excluded.deleted,
          updated_at = excluded.updated_at,
-             seq = excluded.seq
+         seq = excluded.seq
        WHERE excluded.updated_at > sync_goal_achievements.updated_at
        ON CONFLICT(uuid) DO NOTHING`,
     );
 
     const upsertSetting = stmts.prepare<[string, string, string, string]>(
-      `INSERT INTO sync_settings (user_id, key, value, updated_at)
-       VALUES (?, ?, ?, ?)
+      `INSERT INTO sync_settings (user_id, key, value, updated_at, seq)
+       VALUES (?, ?, ?, ?, (SELECT COALESCE(MAX(seq), 0) + 1 FROM sync_settings))
        ON CONFLICT(user_id, key) DO UPDATE SET
          value = excluded.value,
-         updated_at = excluded.updated_at
+         updated_at = excluded.updated_at,
+         seq = excluded.seq
        WHERE excluded.updated_at > sync_settings.updated_at`,
     );
 
@@ -563,7 +577,7 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
          data_url = excluded.data_url,
          dominant_color = excluded.dominant_color,
          updated_at = excluded.updated_at,
-             seq = excluded.seq
+         seq = excluded.seq
        WHERE excluded.updated_at > sync_icons.updated_at`,
     );
 
@@ -578,14 +592,15 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
         string,
       ]
     >(
-      `INSERT INTO sync_overrides (name_hash, user_id, app_name, display_name, color, icon_data_url, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO sync_overrides (name_hash, user_id, app_name, display_name, color, icon_data_url, updated_at, seq)
+       VALUES (?, ?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(seq), 0) + 1 FROM sync_overrides))
        ON CONFLICT(name_hash, user_id) DO UPDATE SET
          app_name = excluded.app_name,
          display_name = excluded.display_name,
          color = excluded.color,
          icon_data_url = excluded.icon_data_url,
-         updated_at = excluded.updated_at
+         updated_at = excluded.updated_at,
+         seq = excluded.seq
        WHERE excluded.updated_at > sync_overrides.updated_at`,
     );
 
@@ -603,7 +618,7 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
          project = excluded.project,
          deleted = excluded.deleted,
          updated_at = excluded.updated_at,
-             seq = excluded.seq
+         seq = excluded.seq
        WHERE sync_tag_sticky_exclusions.user_id = excluded.user_id
          AND excluded.updated_at > sync_tag_sticky_exclusions.updated_at`,
     );
@@ -619,7 +634,7 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
          app_name = excluded.app_name,
          deleted = excluded.deleted,
          updated_at = excluded.updated_at,
-             seq = excluded.seq
+         seq = excluded.seq
        WHERE sync_tag_sticky_project_apps.user_id = excluded.user_id
          AND excluded.updated_at > sync_tag_sticky_project_apps.updated_at`,
     );
@@ -636,7 +651,7 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
          project = excluded.project,
          deleted = excluded.deleted,
          updated_at = excluded.updated_at,
-             seq = excluded.seq
+         seq = excluded.seq
        WHERE sync_tag_sticky_subproject_scopes.user_id = excluded.user_id
          AND excluded.updated_at > sync_tag_sticky_subproject_scopes.updated_at`,
     );
@@ -674,7 +689,7 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
          last_seen = excluded.last_seen,
          deleted = excluded.deleted,
          updated_at = excluded.updated_at,
-             seq = excluded.seq
+         seq = excluded.seq
        WHERE sync_media_links.user_id = excluded.user_id
          AND excluded.updated_at > sync_media_links.updated_at`,
     );
@@ -706,7 +721,7 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
          model = excluded.model,
          deleted = excluded.deleted,
          updated_at = excluded.updated_at,
-             seq = excluded.seq
+         seq = excluded.seq
        WHERE sync_app_categories.user_id = excluded.user_id
          AND excluded.updated_at > sync_app_categories.updated_at`,
     );
@@ -775,7 +790,7 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
          deleted = excluded.deleted,
          last_fired_at = excluded.last_fired_at,
          updated_at = excluded.updated_at,
-             seq = excluded.seq
+         seq = excluded.seq
        WHERE sync_reminders.user_id = excluded.user_id
          AND excluded.updated_at > sync_reminders.updated_at`,
     );
@@ -812,7 +827,7 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
          dismissed_at = excluded.dismissed_at,
          deleted = excluded.deleted,
          updated_at = excluded.updated_at,
-             seq = excluded.seq
+         seq = excluded.seq
        WHERE sync_reminder_events.user_id = excluded.user_id
          AND excluded.updated_at > sync_reminder_events.updated_at`,
     );
@@ -825,7 +840,7 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
        ON CONFLICT(uuid) DO UPDATE SET
          deleted = excluded.deleted,
          updated_at = excluded.updated_at,
-             seq = excluded.seq
+         seq = excluded.seq
        WHERE sync_entry_dismissals.user_id = excluded.user_id
          AND excluded.updated_at > sync_entry_dismissals.updated_at`,
     );
@@ -1351,15 +1366,18 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
     // filtered: the set is bounded by OVERRIDE_PULL_LIMIT and the client
     // de-dupes on LWW, so a full list costs little and avoids the
     // shared-timestamp pagination hazard the other tables need cursors for.
-    const overrides = fastify.db
-      .prepare<[string], SyncOverride>(
-        `SELECT name_hash, app_name, display_name, color, icon_data_url, updated_at
-         FROM sync_overrides
-         WHERE user_id = ?
-         ORDER BY updated_at ASC
-         LIMIT ${OVERRIDE_PULL_LIMIT}`,
-      )
-      .all(userId);
+    const overrides: SyncOverride[] =
+      seqCursors.overrides !== undefined
+        ? pullBySeq<SyncOverride>(fastify.db, userId, "overrides", seqCursors.overrides)
+        : fastify.db
+        .prepare<[string], SyncOverride>(
+          `SELECT name_hash, app_name, display_name, color, icon_data_url, updated_at
+           FROM sync_overrides
+           WHERE user_id = ?
+           ORDER BY updated_at ASC
+           LIMIT ${OVERRIDE_PULL_LIMIT}`,
+        )
+        .all(userId);
 
     // Settings have the same shared-timestamp hazard as icons — a single
     // bulk update (e.g. a Reset Cloud Data → re-push flow) can stamp every
@@ -1368,30 +1386,33 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
     // existing behavior is preserved when a client doesn't send
     // `setting_cursor`.
     const settingCursor = body.setting_cursor;
-    const settings = settingCursor
-      ? fastify.db
-          .prepare<[string, string, string, string], SyncSetting>(
-            `SELECT key, value, updated_at
-             FROM sync_settings
-             WHERE user_id = ?
-               AND (updated_at > ? OR (updated_at = ? AND key > ?))
-             ORDER BY updated_at ASC, key ASC
-             LIMIT ${SETTING_LIMIT}`,
-          )
-          .all(
-            userId,
-            settingCursor.updated_at,
-            settingCursor.updated_at,
-            settingCursor.key,
-          )
-      : fastify.db
-          .prepare<[string, string], SyncSetting>(
-            `SELECT key, value, updated_at
-             FROM sync_settings
-             WHERE user_id = ? AND updated_at > ?
-             ORDER BY updated_at ASC, key ASC`,
-          )
-          .all(userId, cursor);
+    const settings: SyncSetting[] =
+      seqCursors.settings !== undefined
+        ? pullBySeq<SyncSetting>(fastify.db, userId, "settings", seqCursors.settings)
+        : settingCursor
+        ? fastify.db
+            .prepare<[string, string, string, string], SyncSetting>(
+              `SELECT key, value, updated_at
+               FROM sync_settings
+               WHERE user_id = ?
+                 AND (updated_at > ? OR (updated_at = ? AND key > ?))
+               ORDER BY updated_at ASC, key ASC
+               LIMIT ${SETTING_LIMIT}`,
+            )
+            .all(
+              userId,
+              settingCursor.updated_at,
+              settingCursor.updated_at,
+              settingCursor.key,
+            )
+        : fastify.db
+            .prepare<[string, string], SyncSetting>(
+              `SELECT key, value, updated_at
+               FROM sync_settings
+               WHERE user_id = ? AND updated_at > ?
+               ORDER BY updated_at ASC, key ASC`,
+            )
+            .all(userId, cursor);
 
     // Tag sticky exclusions (005). Same compound-cursor pattern as icons /
     // settings — a Reset Cloud Data → re-push flow can stamp every row
@@ -1850,6 +1871,8 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
         reminders,
         reminder_events: reminderEvents,
         entry_dismissals: entryDismissals,
+        overrides,
+        settings,
       } as Record<SeqTable, Array<{ seq?: number | null }>>,
       seqMax,
     );

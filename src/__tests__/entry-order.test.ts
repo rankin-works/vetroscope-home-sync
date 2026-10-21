@@ -172,6 +172,8 @@ describe("entry pulls by save order", () => {
       "reminders",
       "reminder_events",
       "entry_dismissals",
+      "overrides",
+      "settings",
     ];
     const zeroCursors = () => Object.fromEntries(SEQ_TABLES.map((t) => [t, 0]));
     const otherRows = (updatedAt: string) => ({
@@ -239,6 +241,60 @@ describe("entry pulls by save order", () => {
       const legacy = (await pull(laptop, { cursor: caughtUp.cursor })).json();
       expect(legacy.entry_dismissals).toEqual([]);
       expect(legacy.notes).toEqual([]);
+    });
+
+    it("sends settings and app overrides only when they change (older clients still get all of them)", async () => {
+      const override = {
+        name_hash: `h-${randomUUID()}`,
+        app_name: "app",
+        display_name: "App",
+        color: null,
+        icon_data_url: "data:image/png;base64,AAAA",
+        updated_at: iso(),
+      };
+      const setting = { key: "ignored_apps", value: "[]", updated_at: iso() };
+      expect(
+        (
+          await post(
+            "/sync/push",
+            { overrides: [override], settings: [setting] },
+            desktop.accessToken,
+          )
+        ).statusCode,
+      ).toBe(200);
+      const first = (await pull(laptop, { seq_cursors: zeroCursors() })).json();
+      expect(first.overrides).toHaveLength(1);
+      expect(first.settings).toHaveLength(1);
+      const again = (
+        await pull(laptop, {
+          cursor: first.cursor,
+          seq_cursors: first.seq_cursors,
+        })
+      ).json();
+      expect(again.overrides).toEqual([]);
+      expect(again.settings).toEqual([]);
+      expect(
+        (await pull(laptop, { cursor: first.cursor })).json().overrides,
+      ).toHaveLength(1);
+      // A change comes through once.
+      await post(
+        "/sync/push",
+        {
+          overrides: [
+            { ...override, color: "#ff0000", updated_at: iso(1_000) },
+          ],
+        },
+        desktop.accessToken,
+      );
+      const changed = (
+        await pull(laptop, {
+          cursor: again.cursor,
+          seq_cursors: again.seq_cursors,
+        })
+      ).json();
+      expect(changed.overrides.map((o: { color: string }) => o.color)).toEqual([
+        "#ff0000",
+      ]);
     });
 
     it("pages a table larger than one pull without skipping a row", async () => {
