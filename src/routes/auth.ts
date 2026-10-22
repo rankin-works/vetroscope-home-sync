@@ -34,6 +34,7 @@ import {
   DeviceLimitReachedError,
   findDevice,
   recordDeviceAppVersion,
+  recordEncryptedDeviceName,
   registerDevice,
 } from "../lib/device-service.js";
 import { consumeInvite } from "../lib/invite-service.js";
@@ -72,6 +73,9 @@ interface RefreshBody {
   // The device id the desktop uses locally. When it differs from the
   // session's, the session moves to it (adoptDeviceId).
   canonical_device_id?: string;
+  // The device name, encrypted once the client has its sync key
+  // (recordEncryptedDeviceName).
+  device_name?: string;
 }
 
 export const authRoutes: FastifyPluginAsync = async (fastify) => {
@@ -279,6 +283,7 @@ export const authRoutes: FastifyPluginAsync = async (fastify) => {
         // a returning client's version is always up-to-date in the
         // devices table without forcing a re-register.
         recordDeviceAppVersion(fastify.db, user.id, resolvedDeviceId, body.app_version);
+        recordEncryptedDeviceName(fastify.db, user.id, resolvedDeviceId, device_name);
       }
 
       const tokens = await issueTokens(
@@ -343,6 +348,7 @@ export const authRoutes: FastifyPluginAsync = async (fastify) => {
         typeof body.canonical_device_id === "string"
           ? adoptDeviceId(fastify.db, stored.id, stored.device_id, body.canonical_device_id)
           : stored.device_id;
+      recordEncryptedDeviceName(fastify.db, stored.id, deviceId, body.device_name);
       const tokens = await issueTokens(
         fastify.db,
         fastify.jwtSecret,

@@ -54,6 +54,26 @@ export function recordDeviceAppVersion(
   ).run(appVersion ?? null, deviceId, userId);
 }
 
+// A device name the client encrypted with the user's sync key: "enc1:" +
+// hex of iv (12 bytes) | auth tag (16 bytes) | ciphertext.
+const ENCRYPTED_DEVICE_NAME_RE = /^enc1:[0-9a-f]{56,1200}$/i;
+
+// Replace an existing device's stored name with the encrypted one the client
+// sent. A device registers before it has a key, so its row starts with the
+// plaintext name; later logins and refreshes carry ciphertext. Plaintext is
+// never written here, so a row only ever moves to ciphertext.
+export function recordEncryptedDeviceName(
+  db: DB,
+  userId: string,
+  deviceId: string,
+  deviceName: unknown,
+): void {
+  if (typeof deviceName !== "string" || !ENCRYPTED_DEVICE_NAME_RE.test(deviceName)) return;
+  db.prepare<[string, string, string, string]>(
+    "UPDATE devices SET device_name = ? WHERE id = ? AND user_id = ? AND device_name IS NOT ?",
+  ).run(deviceName, deviceId, userId, deviceName);
+}
+
 export function findDevice(
   db: DB,
   userId: string,

@@ -99,6 +99,44 @@ describe("auth flow", () => {
     expect(second.statusCode).toBe(401);
   });
 
+  it("refresh and login store an encrypted device name, never a plaintext one", async () => {
+    const admin = await bootstrapAdmin(h);
+    const encrypted = (fill: string) => `enc1:${fill.repeat(76)}`;
+    const storedName = () =>
+      h.db
+        .prepare<[string], { device_name: string }>("SELECT device_name FROM devices WHERE id = ?")
+        .get(admin.deviceId)?.device_name;
+    const refresh = async (refresh_token: string, device_name: string) => {
+      const res = await h.app.inject({ method: "POST", url: "/auth/refresh", payload: { refresh_token, device_name } });
+      expect(res.statusCode).toBe(200);
+      return res.json().refreshToken as string;
+    };
+
+    // Setup registered the plaintext name; plaintext or malformed names don't replace it.
+    let token = await refresh(admin.refreshToken, "Renamed MBP");
+    token = await refresh(token, "enc1:not-hex");
+    expect(storedName()).toBe("Admin MBP");
+
+    token = await refresh(token, encrypted("a"));
+    expect(storedName()).toBe(encrypted("a"));
+    await refresh(token, "Admin MBP");
+    expect(storedName()).toBe(encrypted("a"));
+
+    const login = await h.app.inject({
+      method: "POST",
+      url: "/auth/login",
+      payload: {
+        email: "admin@test.lan",
+        password: "hunter2hunter2",
+        device_id: admin.deviceId,
+        device_name: encrypted("b"),
+        platform: "darwin",
+      },
+    });
+    expect(login.statusCode).toBe(200);
+    expect(storedName()).toBe(encrypted("b"));
+  });
+
   it("logout revokes the refresh token for the current device", async () => {
     const admin = await bootstrapAdmin(h);
     const out = await h.app.inject({
