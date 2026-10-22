@@ -72,7 +72,7 @@ const SETTING_LIMIT = 100;
 const SEQ_TABLES = {
   tags: {
     table: "sync_tags",
-    columns: "uuid, name, color, sticky, sticky_subprojects, sticky_projects, icon_data_url, parent_uuid, deleted, archived, updated_at",
+    columns: "uuid, name, color, sticky, sticky_subprojects, sticky_projects, icon_data_url, parent_uuid, deleted, archived, merged_into_uuid, updated_at",
     limit: BATCH_SIZE,
   },
   goals: {
@@ -401,6 +401,7 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
         string | null,
         number,
         number,
+        string | null,
         string,
       ]
     >(
@@ -411,8 +412,8 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
       // sticky_projects (011) gate opt-in auto-tagging of new
       // sub-breakdowns / breakdowns. archived (008) marks the tag
       // hidden-but-preserved client-side.
-      `INSERT INTO sync_tags (uuid, user_id, name, color, sticky, sticky_subprojects, sticky_projects, icon_data_url, parent_uuid, deleted, archived, updated_at, seq)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(seq), 0) + 1 FROM sync_tags))
+      `INSERT INTO sync_tags (uuid, user_id, name, color, sticky, sticky_subprojects, sticky_projects, icon_data_url, parent_uuid, deleted, archived, merged_into_uuid, updated_at, seq)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(seq), 0) + 1 FROM sync_tags))
        ON CONFLICT(uuid) DO UPDATE SET
          name = excluded.name,
          color = excluded.color,
@@ -423,6 +424,7 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
          parent_uuid = excluded.parent_uuid,
          deleted = excluded.deleted,
          archived = excluded.archived,
+         merged_into_uuid = excluded.merged_into_uuid,
          updated_at = excluded.updated_at,
          seq = excluded.seq
        WHERE sync_tags.user_id = excluded.user_id
@@ -918,6 +920,8 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
           t.parent_uuid ?? null,
           t.deleted,
           t.archived ?? 0,
+          // Only a tombstone names the tag it was merged into.
+          t.deleted ? (t.merged_into_uuid ?? null) : null,
           t.updated_at || now,
         );
       }
@@ -1224,7 +1228,7 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
         ? pullBySeq<SyncTag>(fastify.db, userId, "tags", seqCursors.tags)
         : fastify.db
         .prepare<[string, string, number], SyncTag>(
-          `SELECT uuid, name, color, sticky, sticky_subprojects, sticky_projects, icon_data_url, parent_uuid, deleted, archived, updated_at
+          `SELECT uuid, name, color, sticky, sticky_subprojects, sticky_projects, icon_data_url, parent_uuid, deleted, archived, merged_into_uuid, updated_at
            FROM sync_tags
            WHERE user_id = ? AND updated_at > ?
            ORDER BY updated_at ASC
@@ -2002,7 +2006,7 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
         return reply.status(400).send({ error: "occurrence_key required" });
       }
       const now = new Date().toISOString();
-      fastify.db
+      const inserted = fastify.db
         .prepare(
           `INSERT INTO sync_reminder_claims (user_id, occurrence_key, device_id, claimed_at)
            VALUES (?, ?, ?, ?)
@@ -2018,7 +2022,11 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
             WHERE user_id = ? AND occurrence_key = ?`,
         )
         .get(auth.sub, occurrenceKey);
-      return reply.send({ claimed: row?.device_id === auth.device_id });
+      const claimed = row?.device_id === auth.device_id;
+      // `repeat`: this device already claimed it earlier — it showed (or
+      // was showing) this occurrence, so it must not notify again. A device
+      // whose local history lost the ack re-asks every tick otherwise.
+      return reply.send({ claimed, repeat: claimed && inserted.changes === 0 });
     },
   );
 };

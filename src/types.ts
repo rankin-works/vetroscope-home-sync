@@ -148,6 +148,9 @@ export interface SyncTag {
   // hidden from default tag pickers and refuse new assignments.
   // Optional on the wire — pre-008 servers drop it. Added in migration 008.
   archived?: number;
+  // On a tombstone of a tag merged away as a duplicate name: the tag it was
+  // merged into. Added in 036.
+  merged_into_uuid?: string | null;
   updated_at: string;
 }
 

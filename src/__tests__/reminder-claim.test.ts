@@ -35,7 +35,7 @@ describe("POST /sync/reminder-claim", () => {
       payload: { occurrence_key: key },
     });
     expect(first.statusCode).toBe(200);
-    expect(first.json()).toEqual({ claimed: true });
+    expect(first.json()).toEqual({ claimed: true, repeat: false });
 
     const second = await h.app.inject({
       method: "POST",
@@ -44,6 +44,16 @@ describe("POST /sync/reminder-claim", () => {
       payload: { occurrence_key: key },
     });
     expect(second.statusCode).toBe(200);
-    expect(second.json()).toEqual({ claimed: false });
+    expect(second.json()).toEqual({ claimed: false, repeat: false });
+
+    // The winner asking again (its local ack was lost) is told it already
+    // showed this occurrence, so it acks instead of notifying again.
+    const again = await h.app.inject({
+      method: "POST",
+      url: "/sync/reminder-claim",
+      headers: { authorization: `Bearer ${admin.accessToken}` },
+      payload: { occurrence_key: key },
+    });
+    expect(again.json()).toEqual({ claimed: true, repeat: true });
   });
 });

@@ -692,7 +692,7 @@ describe("/sync", () => {
       payload: { occurrence_key: key },
     });
     expect(first.statusCode).toBe(200);
-    expect(first.json()).toEqual({ claimed: true });
+    expect(first.json()).toEqual({ claimed: true, repeat: false });
 
     // Same user, different device — must lose the claim.
     const secondLogin = await h.app.inject({
@@ -715,7 +715,7 @@ describe("/sync", () => {
       payload: { occurrence_key: key },
     });
     expect(lost.statusCode).toBe(200);
-    expect(lost.json()).toEqual({ claimed: false });
+    expect(lost.json()).toEqual({ claimed: false, repeat: false });
 
     // Winner re-claims → still won (idempotent).
     const again = await h.app.inject({
@@ -724,7 +724,7 @@ describe("/sync", () => {
       headers: { authorization: `Bearer ${admin.accessToken}` },
       payload: { occurrence_key: key },
     });
-    expect(again.json()).toEqual({ claimed: true });
+    expect(again.json()).toEqual({ claimed: true, repeat: true });
   });
 
   it("reminder tag fields and reminder events round-trip through push + pull", async () => {
@@ -899,5 +899,38 @@ describe("/sync", () => {
       payload: {},
     });
     expect(res.statusCode).toBe(200);
+  });
+});
+
+describe("merged tag tombstones", () => {
+  let h: Harness;
+  beforeEach(async () => {
+    h = await createHarness();
+  });
+  afterEach(async () => {
+    await h.cleanup();
+  });
+
+  it("stores and returns merged_into_uuid on a tombstone, never on a live tag", async () => {
+    const admin = await bootstrapAdmin(h);
+    const tag = (uuid: string, deleted: number, merged: string | null) => ({
+      uuid, name: "enc-name", color: "#000000", sticky: 0, deleted, merged_into_uuid: merged,
+      updated_at: "2026-07-01T00:00:00.000Z",
+    });
+    const res = await h.app.inject({
+      method: "POST",
+      url: "/sync/push",
+      headers: { authorization: `Bearer ${admin.accessToken}` },
+      payload: { tags: [tag("loser", 1, "winner"), tag("winner", 0, "ignored")] },
+    });
+    expect(res.statusCode).toBe(200);
+    const pull = await h.app.inject({
+      method: "POST",
+      url: "/sync/pull",
+      headers: { authorization: `Bearer ${admin.accessToken}` },
+      payload: { cursor: null, device_id: admin.deviceId, seq_cursors: { tags: 0 } },
+    });
+    const byUuid = Object.fromEntries((pull.json().tags as Array<{ uuid: string; merged_into_uuid: string | null }>).map((t) => [t.uuid, t.merged_into_uuid]));
+    expect(byUuid).toEqual({ loser: "winner", winner: null });
   });
 });
