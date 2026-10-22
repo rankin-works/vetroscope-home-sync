@@ -573,3 +573,40 @@ describe("/sync/push device_id integrity", () => {
     expect(row.device_id).toBe(second.device_id);
   });
 });
+
+describe("/sync/push icons_remove / overrides_remove", () => {
+  let h: Harness;
+  beforeEach(async () => {
+    h = await createHarness();
+  });
+  afterEach(async () => {
+    await h.cleanup();
+  });
+
+  const hex = (c: string) => c.repeat(64);
+  const icon = (name_hash: string) => ({
+    name_hash, app_name: "enc-app", platform: "darwin", data_url: "enc-icon", dominant_color: "#ffffff", updated_at: T_VICTIM,
+  });
+  const override = (name_hash: string) => ({
+    name_hash, app_name: "enc-app", display_name: "enc-name", color: null, icon_data_url: null, updated_at: T_VICTIM,
+  });
+
+  it("deletes only the caller's rows with those hashes", async () => {
+    const owner = await bootstrapAdmin(h);
+    const other = await registerSecondUser(h, owner.accessToken);
+    await push(h, owner.accessToken, { icons: [icon(hex("a")), icon(hex("b"))], overrides: [override(hex("a")), override(hex("b"))] });
+    await push(h, other.accessToken, { icons: [icon(hex("a"))], overrides: [override(hex("a"))] });
+
+    const res = await push(h, owner.accessToken, { icons_remove: [hex("a"), "not-a-hash", 7], overrides_remove: [hex("a")] });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().removed).toEqual({ icons: 1, overrides: 1 });
+
+    const hashes = (table: string, userId: string) =>
+      (h.db.prepare(`SELECT name_hash FROM ${table} WHERE user_id = ? ORDER BY name_hash`).all(userId) as Array<{ name_hash: string }>)
+        .map((r) => r.name_hash);
+    expect(hashes("sync_icons", owner.userId)).toEqual([hex("b")]);
+    expect(hashes("sync_overrides", owner.userId)).toEqual([hex("b")]);
+    expect(hashes("sync_icons", other.userId)).toEqual([hex("a")]);
+    expect(hashes("sync_overrides", other.userId)).toEqual([hex("a")]);
+  });
+});

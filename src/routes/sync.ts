@@ -50,6 +50,14 @@ import { SERVER_MIN_CLIENT_VERSION } from "./server-info.js";
 
 const BATCH_SIZE = 500;
 const ICON_LIMIT = 50;
+
+/** Well-formed name hashes from a push's icons_remove / overrides_remove. */
+function nameHashes(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .filter((h): h is string => typeof h === "string" && /^[0-9a-f]{64}$/.test(h))
+    .slice(0, BATCH_SIZE);
+}
 const OVERRIDE_PULL_LIMIT = 500;
 // Settings are a small allowlist (see SYNCED_SETTING_KEYS) so the legacy
 // behavior was "no LIMIT" — it always fit in one response. With the
@@ -869,6 +877,11 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
     }
     const callerDeviceId = auth.device_id;
 
+    const removedIcons = nameHashes(body.icons_remove);
+    const removedOverrides = nameHashes(body.overrides_remove);
+    const removeIcon = stmts.prepare<[string, string]>("DELETE FROM sync_icons WHERE user_id = ? AND name_hash = ?");
+    const removeOverride = stmts.prepare<[string, string]>("DELETE FROM sync_overrides WHERE user_id = ? AND name_hash = ?");
+
     const tx = fastify.db.transaction(() => {
       for (const e of (body.entries ?? []).slice(0, BATCH_SIZE)) {
         const safeDeviceId =
@@ -1000,6 +1013,10 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
           o.updated_at || now,
         );
       }
+      // Rows the client stored under the old unkeyed hash of the app name
+      // and has since uploaded under a keyed one: delete the old copies.
+      for (const h of removedIcons) removeIcon.run(userId, h);
+      for (const h of removedOverrides) removeOverride.run(userId, h);
       for (const tse of (body.tag_sticky_exclusions ?? []).slice(
         0,
         BATCH_SIZE,
@@ -1138,6 +1155,8 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
         achievements: body.achievements?.length ?? 0,
       },
       cursor: now,
+      // Tells the client this server handles icons_remove / overrides_remove.
+      removed: { icons: removedIcons.length, overrides: removedOverrides.length },
     });
   });
 

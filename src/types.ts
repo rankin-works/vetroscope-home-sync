@@ -370,6 +370,11 @@ export interface PushPayload {
   achievements?: SyncGoalAchievement[];
   icons?: SyncIcon[];
   overrides?: SyncOverride[];
+  // name_hash values of icon / override rows to delete: rows stored under
+  // the old unkeyed SHA-256 of the app name, once the client has uploaded
+  // them again under a keyed hash. Older servers ignore these.
+  icons_remove?: string[];
+  overrides_remove?: string[];
   settings?: SyncSetting[];
   // Per-(tag, app, project) sticky-exclusion tombstones. Added in 005.
   // Pre-005 servers silently drop this collection.
