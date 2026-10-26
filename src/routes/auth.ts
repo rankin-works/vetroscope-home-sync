@@ -343,6 +343,13 @@ export const authRoutes: FastifyPluginAsync = async (fastify) => {
         .prepare<[string]>("DELETE FROM refresh_tokens WHERE token_hash = ?")
         .run(tokenHash);
 
+      // A removed device's refresh tokens are deleted with it, but refresh
+      // tokens have no foreign key to devices, so never renew a session for
+      // a device that's no longer the user's.
+      if (findDevice(fastify.db, stored.id, stored.device_id) === undefined) {
+        return reply.status(401).send({ error: "invalid_refresh_token" });
+      }
+
       recordDeviceAppVersion(fastify.db, stored.id, stored.device_id, body.app_version);
       const deviceId =
         typeof body.canonical_device_id === "string"

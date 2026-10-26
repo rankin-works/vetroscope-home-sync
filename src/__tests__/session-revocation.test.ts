@@ -247,3 +247,80 @@ describe("/user/sync-key/unlock rate limit", () => {
     expect(limited.headers["retry-after"]).toBeDefined();
   });
 });
+
+describe("removed device", () => {
+  let h: Harness;
+  beforeEach(async () => {
+    h = await createHarness();
+  });
+  afterEach(async () => {
+    await h.cleanup();
+  });
+
+  async function removeDevice(h: Harness, token: string, deviceId: string) {
+    const res = await h.app.inject({
+      method: "DELETE",
+      url: `/user/devices/${deviceId}`,
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(res.statusCode).toBe(200);
+  }
+
+  it("refuses the removed device's access token on every signed-in route", async () => {
+    const admin = await bootstrapAdmin(h);
+    const other = await secondDevice(h);
+    await removeDevice(h, admin.accessToken, other.deviceId);
+
+    const auth = { authorization: `Bearer ${other.accessToken}` };
+    const calls = [
+      { method: "GET", url: "/user/profile" },
+      { method: "POST", url: "/user/sync-key/unlock" },
+      { method: "GET", url: "/user/google-calendar-accounts" },
+      { method: "DELETE", url: `/user/devices/${admin.deviceId}` },
+      { method: "POST", url: "/sync/push", payload: {} },
+      { method: "GET", url: "/admin/invites" },
+    ] as const;
+    for (const call of calls) {
+      const res = await h.app.inject({ ...call, headers: auth });
+      expect(res.statusCode, call.url).toBe(403);
+      expect(res.json().error, call.url).toBe("DEVICE_UNKNOWN");
+    }
+    const pw = await changePassword(h, other.accessToken, "newpassword123");
+    expect(pw.statusCode).toBe(403);
+    expect(h.db.prepare("SELECT COUNT(*) AS n FROM refresh_tokens WHERE device_id = ?").get(other.deviceId))
+      .toEqual({ n: 0 });
+
+    // The owner's own device is untouched.
+    expect((await profile(h, admin.accessToken)).statusCode).toBe(200);
+  });
+
+  it("never renews a session for a device that's gone", async () => {
+    const admin = await bootstrapAdmin(h);
+    const other = await secondDevice(h);
+    // A refresh token left behind for a device with no row (refresh_tokens
+    // has no foreign key to devices).
+    h.db.prepare("DELETE FROM devices WHERE id = ?").run(other.deviceId);
+    const refreshed = await h.app.inject({
+      method: "POST",
+      url: "/auth/refresh",
+      payload: { refresh_token: other.refreshToken },
+    });
+    expect(refreshed.statusCode).toBe(401);
+    expect(refreshed.json().error).toBe("invalid_refresh_token");
+    expect((await profile(h, admin.accessToken)).statusCode).toBe(200);
+  });
+
+  it("still accepts a token minted before the device moved to a new id", async () => {
+    await bootstrapAdmin(h);
+    const other = await secondDevice(h);
+    const canonical = "6f1c2a7e-3b4d-4c5e-8f9a-0b1c2d3e4f5a";
+    const moved = await h.app.inject({
+      method: "POST",
+      url: "/auth/refresh",
+      payload: { refresh_token: other.refreshToken, canonical_device_id: canonical },
+    });
+    expect(moved.json().device_id).toBe(canonical);
+    // The old access token still names the old id.
+    expect((await profile(h, other.accessToken)).statusCode).toBe(200);
+  });
+});
