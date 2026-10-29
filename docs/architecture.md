@@ -174,6 +174,35 @@ replicated table inherits this requirement — see
 `src/__tests__/tenant-isolation.test.ts`, which carries one case per
 uuid-keyed table so an omission shows up as a missing case.
 
+**Calendar copies** (`src/lib/calendar-links.ts`, `src/routes/calendar-links.ts`).
+A Vetroscope event can be sent to every Google calendar the person switched
+on ("Send new Vetroscope events here"). The server owns the state of every
+copy, so two desktops never create the same copy twice, a delete made on any
+desktop reaches every calendar, and a copy removed in one calendar asks the
+person on every desktop. `/server-info` lists `calendar_links` in `features`;
+a desktop uses it only when it does.
+- `sync_marker_links` — one row per copy (event, calendar). Only the server
+  writes it, through `/user/calendar-links/*`; desktops pull it by `seq`
+  (`seq_cursors.marker_links`). Its claim columns are never pulled.
+- `calendar_targets` — the per-calendar switches; `calendar_account_refs` —
+  opaque per-account ids, so link rows never carry an email;
+  `calendar_links_state` — when the user entered links mode, and the epoch
+  `/sync/reset` bumps; `calendar_devices` — what each desktop declared on the
+  lease route.
+- **Links mode** starts the first time a desktop that declares `links` claims
+  the lease, switches a calendar or connects an account, and is never undone.
+  From then on only such desktops can lead, the vault PUT keeps accounts a
+  desktop leaves out (only `disconnected` removes one), and the server writes
+  `pending` rows for new events the first time it stores them. Before it,
+  everything works as it did, so older desktops see no change.
+- Only Vetroscope's own copies are ever created or deleted in a calendar. A
+  row for an imported event (`role = 'source'`) is the person's own event:
+  deleting the import in Vetroscope, or disconnecting its account, only lets
+  the row go.
+- Google only. Outlook calendars need Vetroscope Cloud.
+- None of this is end-to-end encrypted: calendar ids and event ids are plain
+  text, as the desktop already keeps them, and targets are server settings.
+
 **Encryption:** Clients encrypt sensitive fields client-side before push,
 so the server only ever holds ciphertext for them. A compromised server —
 or a stolen `sync.db` — doesn't yield readable activity data.

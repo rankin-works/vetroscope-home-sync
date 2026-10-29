@@ -17,6 +17,7 @@ import { setupRoutes } from "./routes/setup.js";
 import { syncRoutes } from "./routes/sync.js";
 import { userRoutes } from "./routes/user.js";
 import { googleCalendarRoutes } from "./routes/google-calendar.js";
+import { calendarLinksRoutes } from "./routes/calendar-links.js";
 
 declare module "fastify" {
   interface FastifyInstance {
@@ -114,6 +115,7 @@ export async function buildApp({
   await app.register(authRoutes);
   await app.register(userRoutes);
   await app.register(googleCalendarRoutes);
+  await app.register(calendarLinksRoutes);
   await app.register(syncRoutes);
   await app.register(adminRoutes);
 

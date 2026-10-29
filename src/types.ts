@@ -297,6 +297,36 @@ export interface SyncMarker {
   icon: string;
   deleted: number;
   updated_at: string;
+  // Added in 037 (calendar links). A push without the key keeps the stored
+  // value. `origin` is 'vetroscope' for an event made in Vetroscope (only
+  // those are sent to calendars); `created_at` is set on the first insert
+  // only, clamped to the server's clock. A client that sends
+  // `created_at: null` asks this server never to send the event anywhere.
+  origin?: string | null;
+  repeat_rule?: string | null;
+  created_at?: string | null;
+}
+
+/** One copy of an event in one calendar (037), as desktops pull it. Only
+ *  the server changes these; see lib/calendar-links.ts. */
+export interface SyncMarkerLink {
+  marker_uuid: string;
+  provider: string;
+  calendar_id: string;
+  role: string;
+  state: string;
+  reason: string;
+  gen: number;
+  account_ref: string | null;
+  event_id: string | null;
+  etag: string | null;
+  remote_updated_at: string | null;
+  pushed_hash: string | null;
+  created_by: string;
+  created_at: string;
+  linked_at: string | null;
+  updated_at: string;
+  seq?: number;
 }
 
 export interface SyncNote {
@@ -508,6 +538,16 @@ export interface PullResponse {
   entry_cursor?: EntryCursor;
   // Next seq cursor for each table the client sent one for.
   seq_cursors?: Record<string, number>;
+  // Calendar copies (037). Sent only to a client that sent
+  // seq_cursors.marker_links; a client that didn't keeps its rows as they are.
+  marker_links?: SyncMarkerLink[];
+  // Bumped by every /sync/reset. A desktop that sees it change drops its
+  // local link rows and pulls them again from seq 0, once the resetting
+  // desktop has uploaded its own (links_adopted, or links_epoch_at more
+  // than two minutes ago).
+  links_epoch?: number;
+  links_epoch_at?: string | null;
+  links_adopted?: boolean;
   has_more?: boolean;
   // Set by v0.1.0-beta.4+ servers when icons / settings were paginated.
   // The client round-trips them on the next pull. Absent when the

@@ -9,6 +9,9 @@
 //     X-Forwarded-For when we're behind a reverse proxy)
 //
 // We cap the keyed map so a flood of spoofed IPs can't OOM the server.
+//
+// Signed-in routes can key on the user instead (`keyOf`), so one account's
+// desktops share a budget wherever they connect from.
 
 import type { FastifyReply, FastifyRequest, preHandlerHookHandler } from "fastify";
 
@@ -21,10 +24,12 @@ interface LimiterOptions {
   readonly limit: number;
   readonly windowMs: number;
   readonly maxKeys?: number;
+  /** Bucket key; the peer IP when omitted. */
+  readonly keyOf?: (request: FastifyRequest) => string;
 }
 
 export function buildRateLimiter(opts: LimiterOptions): preHandlerHookHandler {
-  const { limit, windowMs } = opts;
+  const { limit, windowMs, keyOf } = opts;
   const maxKeys = opts.maxKeys ?? 10_000;
   const buckets = new Map<string, Bucket>();
 
@@ -45,7 +50,7 @@ export function buildRateLimiter(opts: LimiterOptions): preHandlerHookHandler {
   }
 
   return async (request: FastifyRequest, reply: FastifyReply) => {
-    const key = request.ip || "unknown";
+    const key = (keyOf ? keyOf(request) : request.ip) || "unknown";
     const now = Date.now();
     let bucket = buckets.get(key);
 

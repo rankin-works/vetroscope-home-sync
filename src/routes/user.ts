@@ -269,6 +269,13 @@ export const userRoutes: FastifyPluginAsync = async (fastify) => {
             [string, string]
           >("DELETE FROM devices WHERE id = ? AND user_id = ?")
           .run(deviceId, auth.sub);
+        // What it declared for calendar links goes with it. Its calendar
+        // claims count as expired from now on (they need a live device).
+        fastify.db
+          .prepare<
+            [string, string]
+          >("DELETE FROM calendar_devices WHERE device_id = ? AND user_id = ?")
+          .run(deviceId, auth.sub);
       });
       tx();
       return reply.send({ ok: true });

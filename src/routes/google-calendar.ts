@@ -4,9 +4,26 @@
 // Refresh tokens are sealed with AES-256-GCM before they touch the DB;
 // the leader lease keeps multiple devices on one account from running the
 // calendar sync loop simultaneously.
+//
+// Calendar links (lib/calendar-links.ts) hook in here twice. The vault PUT
+// is the only place accounts change on this server, so a disconnect is
+// settled in its transaction. The lease records what each desktop declares
+// and, once a user is in links mode, only lets desktops that run calendar
+// links lead, since older ones delete copies they don't know about.
 
 import type { FastifyPluginAsync } from "fastify";
 
+import type { DB } from "../db.js";
+import {
+  declaresLinks,
+  disconnectKeep,
+  enterLinksMode,
+  ensureRefs,
+  inLinksMode,
+  parseProviders,
+  readVault,
+  recordProviders,
+} from "../lib/calendar-links.js";
 import { decryptSecret, encryptSecret } from "../lib/secret-crypto.js";
 import type { JWTPayload } from "../types.js";
 
@@ -122,7 +139,7 @@ export const googleCalendarRoutes: FastifyPluginAsync = async (fastify) => {
     return reply.send({ accounts });
   });
 
-  fastify.put<{ Body: { accounts?: unknown } }>(
+  fastify.put<{ Body: { accounts?: unknown; disconnected?: unknown; links?: unknown } }>(
     "/user/google-calendar-accounts",
     async (request, reply) => {
       const auth = request.authUser as JWTPayload;
@@ -163,7 +180,21 @@ export const googleCalendarRoutes: FastifyPluginAsync = async (fastify) => {
            deleted = 0`,
       );
 
+      const disconnected = parseDisconnected(body.disconnected);
       const tx = fastify.db.transaction(() => {
+        // A desktop that runs calendar links connecting an account starts
+        // links mode first, from the accounts there were before this PUT,
+        // so a new account starts with every switch off.
+        if (body.links === true) {
+          enterLinksMode(
+            fastify.db,
+            auth.sub,
+            auth.device_id,
+            readVault(fastify.db, auth.sub, fastify.jwtSecret),
+            now,
+          );
+        }
+        const linksMode = inLinksMode(fastify.db, auth.sub);
         for (const a of parsed) {
           const sealed = encryptSecret(
             JSON.stringify({
@@ -179,6 +210,18 @@ export const googleCalendarRoutes: FastifyPluginAsync = async (fastify) => {
             fastify.jwtSecret,
           );
           upsert.run(auth.sub, a.email, sealed, now);
+        }
+        if (linksMode) {
+          settleLinksModePut(
+            fastify.db,
+            auth.sub,
+            auth.device_id,
+            parsed,
+            disconnected,
+            now,
+            fastify.jwtSecret,
+          );
+          return;
         }
         if (parsed.length === 0) {
           fastify.db
@@ -202,7 +245,7 @@ export const googleCalendarRoutes: FastifyPluginAsync = async (fastify) => {
     },
   );
 
-  fastify.post<{ Body: { steal?: unknown } }>(
+  fastify.post<{ Body: { steal?: unknown; providers?: unknown; declare?: unknown } }>(
     "/user/google-calendar-leader",
     async (request, reply) => {
       const auth = request.authUser as JWTPayload;
@@ -213,6 +256,42 @@ export const googleCalendarRoutes: FastifyPluginAsync = async (fastify) => {
       const now = Date.now();
       const nowIso = new Date(now).toISOString();
       const leaseUntil = new Date(now + LEASE_MS).toISOString();
+      const providers = parseProviders(request.body?.providers);
+      const links = providers.includes("links");
+      const db = fastify.db;
+
+      // Every claim records what the device can do. `declare` records only
+      // that, without touching the lease, and never starts links mode: a
+      // desktop declares at launch even with no calendar account.
+      recordProviders(db, auth.sub, auth.device_id, providers, nowIso);
+      if (request.body?.declare === true) {
+        return reply.send({
+          ok: true,
+          declared: true,
+          links_mode: inLinksMode(db, auth.sub),
+        });
+      }
+
+      // The first claim from a desktop that runs calendar links, once the
+      // user has a calendar account, starts links mode.
+      if (links && !inLinksMode(db, auth.sub)) {
+        db.transaction(() => {
+          const vault = readVault(db, auth.sub, fastify.jwtSecret);
+          if (vault.length > 0) {
+            enterLinksMode(db, auth.sub, auth.device_id, vault, nowIso);
+          }
+        })();
+      }
+      const linksMode = inLinksMode(db, auth.sub);
+      // An older desktop can't lead in links mode. This is a 200 on
+      // purpose: older desktops lead anyway on any other answer.
+      if (linksMode && !links) {
+        return reply.send({
+          claimed: false,
+          reason: "update_required",
+          links_mode: true,
+        });
+      }
 
       const existing = fastify.db
         .prepare<
@@ -223,8 +302,12 @@ export const googleCalendarRoutes: FastifyPluginAsync = async (fastify) => {
         )
         .get(auth.sub);
 
+      // In links mode a lease held by a desktop without calendar links
+      // counts as expired.
       const expired =
-        !existing || new Date(existing.lease_until).getTime() <= now;
+        !existing ||
+        new Date(existing.lease_until).getTime() <= now ||
+        (linksMode && !declaresLinks(db, auth.sub, existing.device_id));
       const mine = existing?.device_id === auth.device_id;
 
       if (!expired && !mine && !steal) {
@@ -232,6 +315,7 @@ export const googleCalendarRoutes: FastifyPluginAsync = async (fastify) => {
           claimed: false,
           device_id: existing!.device_id,
           lease_until: existing!.lease_until,
+          links_mode: linksMode,
         });
       }
 
@@ -250,7 +334,74 @@ export const googleCalendarRoutes: FastifyPluginAsync = async (fastify) => {
         device_id: auth.device_id,
         lease_until: leaseUntil,
         renewed_at: nowIso,
+        links_mode: linksMode,
       });
     },
   );
 };
+
+/** `disconnected: [{email, at}]`: accounts a desktop disconnected, and when. */
+function parseDisconnected(raw: unknown): Array<{ email: string; at: number }> {
+  if (!Array.isArray(raw)) return [];
+  const out: Array<{ email: string; at: number }> = [];
+  for (const d of raw.slice(0, MAX_ACCOUNTS)) {
+    if (!d || typeof d !== "object") continue;
+    const r = d as Record<string, unknown>;
+    const email =
+      typeof r.email === "string" ? r.email.trim().toLowerCase() : "";
+    const at =
+      typeof r.at === "string"
+        ? Date.parse(r.at)
+        : typeof r.at === "number"
+          ? r.at
+          : NaN;
+    if (email && Number.isFinite(at)) out.push({ email, at });
+  }
+  return out;
+}
+
+/** A vault PUT for a user in links mode. The PUT is an upsert: an account a
+ *  desktop leaves out (its copy of the vault may be stale) is kept, so it
+ *  can't remove an account another desktop just connected. Only an account
+ *  named in `disconnected` after its last upsert here is removed, and that
+ *  is a real disconnect: its copies are released, its pending rows
+ *  cancelled and its switches turned off. */
+function settleLinksModePut(
+  db: DB,
+  userId: string,
+  deviceId: string,
+  parsed: VaultAccount[],
+  disconnected: Array<{ email: string; at: number }>,
+  now: string,
+  secret: string,
+): void {
+  const named = new Set(parsed.map((a) => a.email));
+  const stored = db
+    .prepare<[string], { email: string; updated_at: string }>(
+      `SELECT email, updated_at FROM google_calendar_accounts
+        WHERE user_id = ? AND deleted = 0`,
+    )
+    .all(userId);
+  const removed = stored.filter((row) =>
+    disconnected.some(
+      (d) =>
+        d.email === row.email &&
+        !named.has(row.email) &&
+        d.at > Date.parse(row.updated_at),
+    ),
+  );
+  for (const row of removed) {
+    db.prepare(
+      `UPDATE google_calendar_accounts SET deleted = 1, updated_at = ?
+        WHERE user_id = ? AND email = ?`,
+    ).run(now, userId, row.email);
+  }
+  const vault = readVault(db, userId, secret);
+  const refs = ensureRefs(db, userId, [
+    ...vault.map((a) => a.email),
+    ...removed.map((r) => r.email),
+  ]);
+  for (const row of removed) {
+    disconnectKeep(db, userId, refs.get(row.email)!, row.email, vault, deviceId, now);
+  }
+}

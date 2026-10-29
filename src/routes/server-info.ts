@@ -19,6 +19,11 @@ import { VERSION } from "../version.js";
 // Exposed on /server-info so clients can pre-check before pushing.
 const MIN_CLIENT_VERSION = "0.2.36";
 
+// calendar_links: sends a new Vetroscope event to every Google calendar the
+// person switched on, with this server owning each copy's state
+// (/user/calendar-links/*, /user/calendar-targets).
+const SERVER_FEATURES = ["calendar_links"];
+
 export function buildServerInfoRoutes(config: Config): FastifyPluginAsync {
   return async (fastify) => {
     fastify.get("/server-info", async () => {
@@ -30,6 +35,9 @@ export function buildServerInfoRoutes(config: Config): FastifyPluginAsync {
         registration_mode: config.registrationMode,
         max_devices_per_user: config.maxDevicesPerUser,
         min_client_version: MIN_CLIENT_VERSION,
+        // What this server can do beyond plain sync. A client only uses a
+        // feature a server lists here.
+        features: SERVER_FEATURES,
       };
     });
   };

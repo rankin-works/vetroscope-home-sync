@@ -31,6 +31,7 @@ import type {
   SyncGoalAchievement,
   SyncIcon,
   SyncMarker,
+  SyncMarkerLink,
   SyncNote,
   SyncNoteFolder,
   SyncOverride,
@@ -45,6 +46,20 @@ import type {
   SyncReminderEvent,
   SyncEntryDismissal,
 } from "../types.js";
+import {
+  LINK_COLUMNS,
+  calendarContext,
+  canFanOut,
+  creationTime,
+  declaresLinks,
+  fillNewMarker,
+  linksState,
+  resetLinks,
+  restoreMoves,
+  tombstoneMoves,
+  type CalendarContext,
+  type MarkerForFill,
+} from "../lib/calendar-links.js";
 import { compareSemver } from "../lib/semver.js";
 import { SERVER_MIN_CLIENT_VERSION } from "./server-info.js";
 
@@ -82,7 +97,7 @@ const SEQ_TABLES = {
   },
   markers: {
     table: "sync_markers",
-    columns: "uuid, timestamp, end_timestamp, label, color, icon, deleted, updated_at",
+    columns: "uuid, timestamp, end_timestamp, label, color, icon, deleted, origin, repeat_rule, created_at, updated_at",
     limit: BATCH_SIZE,
   },
   notes: {
@@ -157,6 +172,13 @@ const SEQ_TABLES = {
     table: "sync_settings",
     columns: "key, value, updated_at",
     limit: SETTING_LIMIT,
+  },
+  // 037. Calendar copies, by seq only: a client that sends no cursor for
+  // them gets no key, so its local rows stay as they are.
+  marker_links: {
+    table: "sync_marker_links",
+    columns: LINK_COLUMNS,
+    limit: BATCH_SIZE,
   },
 } as const;
 export type SeqTable = keyof typeof SEQ_TABLES;
@@ -465,6 +487,9 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
          AND excluded.updated_at > sync_goals.updated_at`,
     );
 
+    // origin / repeat_rule (037) keep the stored value when the push has
+    // no key for them (the two trailing flags are 0). created_at is written
+    // on the first insert only.
     const upsertMarker = stmts.prepare<
       [
         string,
@@ -476,10 +501,15 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
         string,
         number,
         string,
+        string | null,
+        string | null,
+        string | null,
+        number,
+        number,
       ]
     >(
-      `INSERT INTO sync_markers (uuid, user_id, timestamp, end_timestamp, label, color, icon, deleted, updated_at, seq)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(seq), 0) + 1 FROM sync_markers))
+      `INSERT INTO sync_markers (uuid, user_id, timestamp, end_timestamp, label, color, icon, deleted, updated_at, origin, repeat_rule, created_at, seq)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(seq), 0) + 1 FROM sync_markers))
        ON CONFLICT(uuid) DO UPDATE SET
          timestamp = excluded.timestamp,
          end_timestamp = excluded.end_timestamp,
@@ -487,6 +517,8 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
          color = excluded.color,
          icon = excluded.icon,
          deleted = excluded.deleted,
+         origin = CASE WHEN ? = 1 THEN excluded.origin ELSE sync_markers.origin END,
+         repeat_rule = CASE WHEN ? = 1 THEN excluded.repeat_rule ELSE sync_markers.repeat_rule END,
          updated_at = excluded.updated_at,
          seq = excluded.seq
        WHERE sync_markers.user_id = excluded.user_id
@@ -884,6 +916,16 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
     const removeIcon = stmts.prepare<[string, string]>("DELETE FROM sync_icons WHERE user_id = ? AND name_hash = ?");
     const removeOverride = stmts.prepare<[string, string]>("DELETE FROM sync_overrides WHERE user_id = ? AND name_hash = ?");
 
+    // Calendar links (037), read before the transaction's writes: which
+    // pushed markers this server already has (anywhere: the uuid is a
+    // global key) and, for the caller's, whether they were deleted.
+    const pushedMarkers = (body.markers ?? []).slice(0, BATCH_SIZE);
+    const markerState = storedMarkers(fastify.db, pushedMarkers.map((m) => m.uuid));
+    const links = linksState(fastify.db, userId);
+    const linksMode = (links?.converted_at ?? null) !== null;
+    const createdBy = declaresLinks(fastify.db, userId, callerDeviceId) ? "desktop" : "server";
+    let calendars: CalendarContext | null = null;
+
     const tx = fastify.db.transaction(() => {
       for (const e of (body.entries ?? []).slice(0, BATCH_SIZE)) {
         const safeDeviceId =
@@ -939,7 +981,33 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
           g.updated_at || now,
         );
       }
-      for (const m of (body.markers ?? []).slice(0, BATCH_SIZE)) {
+      const nowMs = Date.parse(now);
+      for (const m of pushedMarkers) {
+        const raw = m as unknown as Record<string, unknown>;
+        const stored = markerState.get(m.uuid);
+        // First store: the one time this server decides which calendars a
+        // new event goes to (lib/calendar-links.ts).
+        let createdAt: string | null = null;
+        if (stored === undefined) {
+          const fill: MarkerForFill = {
+            uuid: m.uuid,
+            origin: raw.origin,
+            repeat_rule: raw.repeat_rule,
+            deleted: m.deleted,
+            updated_at: m.updated_at,
+            created_at: raw.created_at,
+            has_created_at: "created_at" in raw,
+            has_event_id:
+              (typeof raw.google_event_id === "string" && raw.google_event_id !== "") ||
+              (typeof raw.outlook_event_id === "string" && raw.outlook_event_id !== ""),
+          };
+          const c = creationTime(fill, nowMs, links?.epoch_at ?? null);
+          createdAt = c === null ? null : new Date(c).toISOString();
+          if (linksMode && c !== null && canFanOut(fill, c, nowMs)) {
+            calendars ??= calendarContext(fastify.db, userId, fastify.jwtSecret);
+            fillNewMarker(fastify.db, userId, calendars, m.uuid, c, createdBy, now);
+          }
+        }
         upsertMarker.run(
           m.uuid,
           userId,
@@ -950,7 +1018,22 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
           m.icon,
           m.deleted,
           m.updated_at || now,
+          typeof raw.origin === "string" ? raw.origin : null,
+          typeof raw.repeat_rule === "string" ? raw.repeat_rule : null,
+          createdAt,
+          "origin" in raw ? 1 : 0,
+          "repeat_rule" in raw ? 1 : 0,
         );
+        // A delete or restore that won last-write-wins moves the event's
+        // copies; one that lost changed nothing, so it moves nothing.
+        if (stored?.user_id === userId && stored.has_links === 1) {
+          const after = markerDeleted(fastify.db, userId, m.uuid);
+          if (stored.deleted === 0 && after === 1) tombstoneMoves(fastify.db, userId, m.uuid, now);
+          if (stored.deleted === 1 && after === 0) {
+            calendars ??= calendarContext(fastify.db, userId, fastify.jwtSecret);
+            restoreMoves(fastify.db, userId, m.uuid, calendars, now);
+          }
+        }
       }
       for (const n of (body.notes ?? []).slice(0, BATCH_SIZE)) {
         upsertNote.run(
@@ -1254,7 +1337,7 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
         ? pullBySeq<SyncMarker>(fastify.db, userId, "markers", seqCursors.markers)
         : fastify.db
         .prepare<[string, string, number], SyncMarker>(
-          `SELECT uuid, timestamp, end_timestamp, label, color, icon, deleted, updated_at
+          `SELECT uuid, timestamp, end_timestamp, label, color, icon, deleted, origin, repeat_rule, created_at, updated_at
            FROM sync_markers
            WHERE user_id = ? AND updated_at > ?
            ORDER BY updated_at ASC
@@ -1732,6 +1815,12 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
             )
             .all(userId, cursor, BATCH_SIZE);
 
+    const markerLinks: SyncMarkerLink[] =
+      seqCursors.marker_links !== undefined
+        ? pullBySeq<SyncMarkerLink>(fastify.db, userId, "marker_links", seqCursors.marker_links)
+        : [];
+    const links = linksState(fastify.db, userId);
+
     fastify.db
       .prepare<
         [string, string, string]
@@ -1896,6 +1985,7 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
         entry_dismissals: entryDismissals,
         overrides,
         settings,
+        marker_links: markerLinks,
       } as Record<SeqTable, Array<{ seq?: number | null }>>,
       seqMax,
     );
@@ -1919,6 +2009,10 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
       reminders,
       reminder_events: reminderEvents,
       entry_dismissals: entryDismissals,
+      ...(seqCursors.marker_links !== undefined ? { marker_links: markerLinks } : {}),
+      links_epoch: links?.links_epoch ?? 0,
+      links_epoch_at: links?.epoch_at ?? null,
+      links_adopted: links?.epoch_adopted === 1,
       cursor: newCursor,
       entry_cursor: nextEntryCursor,
       seq_cursors: nextSeq.cursors,
@@ -2057,6 +2151,46 @@ export function wipeUserSyncRows(db: Database.Database, userId: string): void {
     for (const t of tables) {
       db.prepare(`DELETE FROM ${t} WHERE user_id = ?`).run(userId);
     }
+    // Calendar copies go too, and the links epoch moves on. The switches,
+    // account refs, links mode and declared devices are settings and stay.
+    resetLinks(db, userId, new Date().toISOString());
   });
   tx();
+}
+
+interface StoredMarker {
+  user_id: string;
+  deleted: number;
+  has_links: number;
+}
+
+/** The stored row for each pushed marker uuid, whoever owns it. */
+function storedMarkers(
+  db: Database.Database,
+  uuids: string[],
+): Map<string, StoredMarker> {
+  const out = new Map<string, StoredMarker>();
+  const stmt = db.prepare<[string], StoredMarker & { uuid: string }>(
+    `SELECT m.uuid, m.user_id, m.deleted,
+            EXISTS (SELECT 1 FROM sync_marker_links l
+                     WHERE l.user_id = m.user_id AND l.marker_uuid = m.uuid) AS has_links
+       FROM sync_markers m WHERE m.uuid = ?`,
+  );
+  for (const uuid of new Set(uuids)) {
+    const row = stmt.get(uuid);
+    if (row) out.set(uuid, row);
+  }
+  return out;
+}
+
+function markerDeleted(
+  db: Database.Database,
+  userId: string,
+  uuid: string,
+): number | undefined {
+  return db
+    .prepare<[string, string], { deleted: number }>(
+      "SELECT deleted FROM sync_markers WHERE uuid = ? AND user_id = ?",
+    )
+    .get(uuid, userId)?.deleted;
 }

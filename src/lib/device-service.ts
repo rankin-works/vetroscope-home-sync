@@ -161,6 +161,11 @@ export function adoptDeviceId(
     move("UPDATE sync_entries SET updated_by_device_id = ? WHERE user_id = ? AND updated_by_device_id = ?");
     move("UPDATE OR IGNORE sync_reminder_claims SET device_id = ? WHERE user_id = ? AND device_id = ?");
     move("UPDATE google_calendar_leader SET device_id = ? WHERE user_id = ? AND device_id = ?");
+    // Calendar links: the merged device keeps what it declared, its claims
+    // and the switches it changed.
+    move("UPDATE OR REPLACE calendar_devices SET device_id = ? WHERE user_id = ? AND device_id = ?");
+    move("UPDATE sync_marker_links SET claim_device = ? WHERE user_id = ? AND claim_device = ?");
+    move("UPDATE calendar_targets SET changed_by = ? WHERE user_id = ? AND changed_by = ?");
     // Record the move for the user's other desktops (033), and point
     // earlier moves to this id at the new one.
     move("UPDATE device_aliases SET new_id = ? WHERE user_id = ? AND new_id = ?");
