@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // An all-day event's dates on sync_markers (040): a push with them stores
-// them, a push without the keys (or with null) keeps them, "" clears both,
-// an invalid value keeps both, both pulls return them, and a push carrying
+// them, a push without the keys (or with null) keeps them unless it moves
+// the event, "" clears both, an invalid value keeps both, both pulls return them, and a push carrying
 // another user's uuid changes nothing.
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -124,6 +124,55 @@ describe("all-day dates on a marker push", () => {
     });
   });
 
+  it("clears the dates when a push without the keys moves the event", async () => {
+    const d = await admin();
+    // Auckland (UTC+13): Nov 26 starts at 2026-11-25T11:00Z. An older
+    // computer moves it to Nov 27, which is still within a day of the
+    // stored date, so only the stored times can tell it moved.
+    await push(d, [
+      marker("m1", {
+        timestamp: "2026-11-25T11:00:00.000Z",
+        all_day_start: "2026-11-26",
+      }),
+    ]);
+    await push(d, [marker("m1", { timestamp: "2026-11-26T11:00:00.000Z" })]);
+    expect(stored("m1")).toMatchObject({ all_day_start: "", all_day_end: null });
+
+    // A range's end stretched by a day, with null keys.
+    await push(d, [
+      marker("m2", {
+        end_timestamp: "2026-12-27T05:00:00.000Z",
+        all_day_start: "2026-12-24",
+        all_day_end: "2026-12-27",
+      }),
+    ]);
+    await push(d, [
+      marker("m2", {
+        end_timestamp: "2026-12-28T05:00:00.000Z",
+        all_day_start: null,
+        all_day_end: null,
+      }),
+    ]);
+    expect(stored("m2")).toMatchObject({ all_day_start: "", all_day_end: null });
+
+    // A row that never had dates stays NULL.
+    await push(d, [marker("m3")]);
+    await push(d, [marker("m3", { timestamp: "2026-11-27T05:00:00.000Z" })]);
+    expect(stored("m3")).toMatchObject({ all_day_start: null, all_day_end: null });
+  });
+
+  it("keeps the dates when the same time is spelled another way", async () => {
+    const d = await admin();
+    await push(d, [marker("m1", { all_day_start: "2026-11-26" })]);
+    await push(d, [
+      marker("m1", { timestamp: "2026-11-26T05:00:00Z", label: "enc-renamed" }),
+    ]);
+    expect(stored("m1")).toMatchObject({
+      all_day_start: "2026-11-26",
+      all_day_end: null,
+    });
+  });
+
   it("stores a range and keeps it on null", async () => {
     const d = await admin();
     await push(d, [
@@ -137,7 +186,13 @@ describe("all-day dates on a marker push", () => {
       all_day_start: "2026-12-24",
       all_day_end: "2026-12-27",
     });
-    await push(d, [marker("m1", { all_day_start: null, all_day_end: null })]);
+    await push(d, [
+      marker("m1", {
+        end_timestamp: "2026-12-27T05:00:00.000Z",
+        all_day_start: null,
+        all_day_end: null,
+      }),
+    ]);
     expect(stored("m1")).toMatchObject({
       all_day_start: "2026-12-24",
       all_day_end: "2026-12-27",

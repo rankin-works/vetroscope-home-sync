@@ -490,7 +490,8 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
     // origin / repeat_rule (037) keep the stored value when the push has
     // no key for them (their flags are 0). created_at is written on the
     // first insert only. all_day_start / all_day_end (040) change together,
-    // only when their two flags are 1 (allDayFields).
+    // only when their two flags are 1 (allDayFields); with the flags 0, a
+    // push that moves the event clears them (MARKER_MOVED).
     const upsertMarker = stmts.prepare<
       [
         string,
@@ -524,8 +525,12 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
          deleted = excluded.deleted,
          origin = CASE WHEN ? = 1 THEN excluded.origin ELSE sync_markers.origin END,
          repeat_rule = CASE WHEN ? = 1 THEN excluded.repeat_rule ELSE sync_markers.repeat_rule END,
-         all_day_start = CASE WHEN ? = 1 THEN excluded.all_day_start ELSE sync_markers.all_day_start END,
-         all_day_end = CASE WHEN ? = 1 THEN excluded.all_day_end ELSE sync_markers.all_day_end END,
+         all_day_start = CASE WHEN ? = 1 THEN excluded.all_day_start
+                              WHEN sync_markers.all_day_start IS NOT NULL AND ${MARKER_MOVED} THEN ''
+                              ELSE sync_markers.all_day_start END,
+         all_day_end = CASE WHEN ? = 1 THEN excluded.all_day_end
+                            WHEN ${MARKER_MOVED} THEN NULL
+                            ELSE sync_markers.all_day_end END,
          updated_at = excluded.updated_at,
          seq = excluded.seq
        WHERE sync_markers.user_id = excluded.user_id
@@ -2181,6 +2186,16 @@ function dayMs(v: unknown): number | null {
   const ms = Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
   return new Date(ms).toISOString().slice(0, 10) === v ? ms : null;
 }
+
+/**
+ * A marker upsert that moves or stretches the stored event. A push that does
+ * so without all-day dates comes from a client that doesn't know about them
+ * (an older one): the stored dates no longer match the times, so the upsert
+ * clears them instead of keeping them. Compared as instants, so another
+ * spelling of the same time isn't a move.
+ */
+const MARKER_MOVED =
+  "(julianday(excluded.timestamp) IS NOT julianday(sync_markers.timestamp) OR julianday(excluded.end_timestamp) IS NOT julianday(sync_markers.end_timestamp))";
 
 /**
  * What a pushed marker does to the stored all-day dates (040). No key or
