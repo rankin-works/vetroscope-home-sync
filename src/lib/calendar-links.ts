@@ -83,6 +83,7 @@ export const REASONS = new Set([
   "target_off",
   "kept",
   "stray",
+  "existing",
 ]);
 export const CREATED_BY = new Set([
   "desktop",
@@ -583,6 +584,101 @@ export interface NewLink extends LinkKey {
   created_by: string;
   created_at?: string;
   linked_at?: string | null;
+}
+
+// ── Existing events added to a calendar ─────────────────────────────
+
+/** SQL on sync_markers `m` (binds @user, @since): a live, one-time
+ *  Vetroscope event of the user, ending at or after @since (NULL: any). */
+const EXISTING_EVENT = `m.user_id = @user AND m.deleted = 0 AND COALESCE(m.origin, 'vetroscope') = 'vetroscope'
+  AND COALESCE(m.repeat_rule, '') = ''
+  AND (@since IS NULL OR MAX(m.timestamp, COALESCE(m.end_timestamp, m.timestamp)) >= @since)`;
+
+/** A row for the key that may be made pending again: `gone` for any
+ *  reason but `stray`. detached (the person's choice) and released (still
+ *  in the calendar, unmanaged) rows are never touched. */
+const REVIVABLE = "l.role = 'copy' AND l.state = 'gone' AND l.reason <> 'stray'";
+
+/** How many events adding existing events to `calendarId` would send:
+ *  `all` of them, and the `upcoming` ones (ending at or after `since`). */
+export function existingCounts(db: DB, userId: string, calendarId: string, since: string): { upcoming: number; all: number } {
+  const row = db
+    .prepare<Record<string, unknown>, { n_all: number; n_upcoming: number | null }>(
+      `SELECT COUNT(*) AS n_all,
+              SUM(CASE WHEN MAX(m.timestamp, COALESCE(m.end_timestamp, m.timestamp)) >= @upcoming THEN 1 ELSE 0 END) AS n_upcoming
+         FROM sync_markers m
+        WHERE ${EXISTING_EVENT}
+          AND NOT EXISTS (SELECT 1 FROM sync_marker_links l
+                           WHERE l.user_id = m.user_id AND l.marker_uuid = m.uuid AND l.provider = @provider
+                             AND l.calendar_id = @calendar AND NOT (${REVIVABLE}))`,
+    )
+    .get({ user: userId, since: null, upcoming: since, provider: PROVIDER, calendar: calendarId });
+  return { upcoming: row?.n_upcoming ?? 0, all: row?.n_all ?? 0 };
+}
+
+/**
+ * The person chose to add existing events to a switched-on calendar:
+ * `pending/existing` for every event in scope with no row for it, and
+ * revivable rows pending again with gen + 1 (a fresh fixed id). Their 7
+ * days count from now (the claim's expiry reads updated_at). Returns how
+ * many rows it wrote. Call inside the PUT's transaction, after the target.
+ */
+export function addExistingEvents(
+  db: DB,
+  userId: string,
+  target: { calendarId: string; accountRef: string },
+  since: string | null,
+  now: string,
+): number {
+  let added = 0;
+  const revivable = db
+    .prepare<Record<string, unknown>, LinkRow>(
+      `SELECT l.* FROM sync_marker_links l JOIN sync_markers m ON m.uuid = l.marker_uuid AND m.user_id = l.user_id
+        WHERE l.user_id = @user AND l.provider = @provider AND l.calendar_id = @calendar AND ${REVIVABLE}
+          AND ${EXISTING_EVENT}`,
+    )
+    .all({ user: userId, provider: PROVIDER, calendar: target.calendarId, since });
+  for (const row of revivable) {
+    moveLink(db, userId, row, {
+      state: "pending",
+      reason: "existing",
+      gen: row.gen + 1,
+      account_ref: target.accountRef,
+      event_id: null,
+      etag: null,
+      remote_updated_at: null,
+      pushed_hash: null,
+      linked_at: null,
+      ever_claimed: 0,
+      claim_device: null,
+      claim_token: null,
+      claim_until: null,
+    }, now);
+    added++;
+  }
+  const fresh = db
+    .prepare<Record<string, unknown>, { uuid: string }>(
+      `SELECT m.uuid FROM sync_markers m
+        WHERE ${EXISTING_EVENT}
+          AND NOT EXISTS (SELECT 1 FROM sync_marker_links l WHERE l.user_id = m.user_id AND l.marker_uuid = m.uuid
+                            AND l.provider = @provider AND l.calendar_id = @calendar)
+        ORDER BY m.uuid`,
+    )
+    .all({ user: userId, provider: PROVIDER, calendar: target.calendarId, since });
+  for (const m of fresh) {
+    const wrote = insertLink(db, userId, {
+      marker_uuid: m.uuid,
+      provider: PROVIDER,
+      calendar_id: target.calendarId,
+      role: "copy",
+      state: "pending",
+      reason: "existing",
+      account_ref: target.accountRef,
+      created_by: "desktop",
+    }, now);
+    if (wrote) added++;
+  }
+  return added;
 }
 
 /** Inserts a row unless its key is taken; true when it was written. */

@@ -176,7 +176,7 @@ uuid-keyed table so an omission shows up as a missing case.
 
 **Calendar copies** (`src/lib/calendar-links.ts`, `src/routes/calendar-links.ts`).
 A Vetroscope event can be sent to every Google calendar the person switched
-on ("Send new Vetroscope events here"). The server owns the state of every
+on ("Sync Vetroscope events"). The server owns the state of every
 copy, so two desktops never create the same copy twice, a delete made on any
 desktop reaches every calendar, and a copy removed in one calendar asks the
 person on every desktop. `/server-info` lists `calendar_links` in `features`;
@@ -195,6 +195,16 @@ a desktop uses it only when it does.
   desktop leaves out (only `disconnected` removes one), and the server writes
   `pending` rows for new events the first time it stores them. Before it,
   everything works as it did, so older desktops see no change.
+- **Existing events.** Switching a calendar on sends only events made from
+  then on, unless the person chooses to add the ones they already have.
+  `GET /user/calendar-targets/existing?provider=google&calendarId=&since=`
+  counts what that adds (`{upcoming, all}`; `since` is the desktop's local
+  midnight), and the target PUT takes `existing: {since}` (`null` for all
+  events). It writes `pending/existing` rows for live, one-time Vetroscope
+  events with no row for that calendar, and makes `gone` rows (switched off,
+  expired, removed by a disconnect) pending again with a new `gen`. Rows the
+  person kept apart (`detached`) or left in the calendar (`released`) are
+  never touched. Their 7 days run from when they were added.
 - Only Vetroscope's own copies are ever created or deleted in a calendar. A
   row for an imported event (`role = 'source'`) is the person's own event:
   deleting the import in Vetroscope, or disconnecting its account, only lets

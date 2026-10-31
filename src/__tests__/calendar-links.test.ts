@@ -1149,3 +1149,102 @@ describe("fixedGoogleId", () => {
     expect(fixedGoogleId("uuid-1", CAL_A, 1)).not.toBe(k);
   });
 });
+
+describe("adding existing events to a calendar", () => {
+  const PAST = "2026-01-10T15:00:00.000Z";
+  const FUTURE = "2099-01-10T15:00:00.000Z";
+  const today = () => {
+    const d = new Date();
+    d.setUTCHours(0, 0, 0, 0);
+    return d.toISOString();
+  };
+  const counts = (d: Device, calendarId: string, since = today()) =>
+    call(d, "GET", `/user/calendar-targets/existing?provider=google&calendarId=${encodeURIComponent(calendarId)}&since=${encodeURIComponent(since)}`);
+  const turnOn = (d: Device, calendarId: string, rev: number, existing?: { since: string | null }) =>
+    call(d, "PUT", "/user/calendar-targets", {
+      provider: "google", account: "me@gmail.com", calendarId, enabled: true, rev, ...(existing ? { existing } : {}),
+    });
+
+  /** Events made a month before CAL_B is switched on: one past, one
+   *  upcoming, plus ones that never count. */
+  async function withHistory(): Promise<Device> {
+    const d = await linksUser();
+    const old = iso(Date.now() - 30 * 24 * 3600 * 1000);
+    await push(d, [
+      marker("past", { timestamp: PAST, created_at: old }),
+      marker("upcoming", { timestamp: FUTURE, created_at: old }),
+      marker("rep", { timestamp: FUTURE, created_at: old, repeat_rule: "weekly" }),
+      marker("imp", { timestamp: FUTURE, created_at: old, origin: "google" }),
+      marker("del", { timestamp: FUTURE, created_at: old, deleted: 1 }),
+    ]);
+    expect(rows(d.userId)).toEqual([]);
+    return d;
+  }
+
+  it("counts what Upcoming and All would add", async () => {
+    const d = await withHistory();
+    const res = await counts(d, CAL_B);
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ upcoming: 1, all: 2 });
+    expect((await call(d, "GET", `/user/calendar-targets/existing?provider=google&calendarId=${CAL_B}`)).statusCode).toBe(400);
+  });
+
+  it("switching on with no choice adds nothing", async () => {
+    const d = await withHistory();
+    const res = await turnOn(d, CAL_B, 0);
+    expect(res.statusCode).toBe(200);
+    expect(res.json().existingAdded).toBeUndefined();
+    expect(rows(d.userId)).toEqual([]);
+  });
+
+  it("Upcoming adds events ending today or later, All the rest, nothing twice", async () => {
+    const d = await withHistory();
+    const up = await turnOn(d, CAL_B, 0, { since: today() });
+    expect(up.statusCode).toBe(200);
+    expect(up.json().existingAdded).toBe(1);
+    expect(rows(d.userId).map((r) => [r.marker_uuid, r.calendar_id, r.state, r.reason, r.gen])).toEqual([
+      ["upcoming", CAL_B, "pending", "existing", 0],
+    ]);
+    const all = await turnOn(d, CAL_B, 1, { since: null });
+    expect(all.json().existingAdded).toBe(1);
+    expect(rows(d.userId).map((r) => r.marker_uuid)).toEqual(["past", "upcoming"]);
+    expect((await counts(d, CAL_B)).json()).toEqual({ upcoming: 0, all: 0 });
+  });
+
+  it("brings back copies that were switched off or removed, never ones the person kept apart", async () => {
+    const d = await withHistory();
+    const now = iso(Date.now());
+    h.db.prepare(
+      `INSERT INTO sync_marker_links (user_id, marker_uuid, provider, calendar_id, role, state, reason, gen, created_by, created_at, updated_at, seq)
+       VALUES (?, 'upcoming', 'google', ?, 'copy', 'gone', 'disconnected', 2, 'desktop', ?, ?, 900001),
+              (?, 'past', 'google', ?, 'copy', 'detached', 'kept', 0, 'desktop', ?, ?, 900002)`,
+    ).run(d.userId, CAL_B, now, now, d.userId, CAL_B, now, now);
+    expect((await counts(d, CAL_B)).json()).toEqual({ upcoming: 1, all: 1 });
+    const res = await turnOn(d, CAL_B, 0, { since: null });
+    expect(res.json().existingAdded).toBe(1);
+    expect(row(d.userId, "upcoming", CAL_B)).toMatchObject({ state: "pending", reason: "existing", gen: 3 });
+    expect(row(d.userId, "upcoming", CAL_B)!.account_ref).toBeTruthy();
+    expect(row(d.userId, "past", CAL_B)).toMatchObject({ state: "detached", reason: "kept" });
+  });
+
+  it("refuses a choice when switching off or with a bad time", async () => {
+    const d = await withHistory();
+    const off = await call(d, "PUT", "/user/calendar-targets", {
+      provider: "google", account: "me@gmail.com", calendarId: CAL_A, enabled: false, rev: 1, existing: { since: null },
+    });
+    expect(off.statusCode).toBe(400);
+    expect((await turnOn(d, CAL_B, 0, { since: "not a time" })).statusCode).toBe(400);
+    expect(rows(d.userId)).toEqual([]);
+  });
+
+  it("their 7 days count from when they were added", async () => {
+    const d = await withHistory();
+    await turnOn(d, CAL_B, 0, { since: null });
+    await call(d, "POST", "/user/calendar-links/claim", { limit: 50 });
+    expect(row(d.userId, "upcoming", CAL_B)).toMatchObject({ state: "pending", reason: "existing" });
+    h.db.prepare("UPDATE sync_marker_links SET updated_at = ?, claim_token = NULL, claim_until = NULL, ever_claimed = 0 WHERE marker_uuid = 'upcoming'")
+      .run(iso(Date.now() - 8 * 24 * 3600 * 1000));
+    await call(d, "POST", "/user/calendar-links/claim", { limit: 50 });
+    expect(row(d.userId, "upcoming", CAL_B)).toMatchObject({ state: "gone", reason: "expired" });
+  });
+});

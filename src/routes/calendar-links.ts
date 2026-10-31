@@ -28,9 +28,11 @@ import {
   claimRows,
   clearClaim,
   declaresLinks,
+  addExistingEvents,
   disconnectStart,
   enterLinksMode,
   ensureRefs,
+  existingCounts,
   fixedGoogleId,
   getLink,
   holderOf,
@@ -64,6 +66,13 @@ const MINUTE = 60 * 1000;
 
 function str(raw: unknown, max = MAX_ID): string | null {
   return typeof raw === "string" && raw.length > 0 && raw.length <= max ? raw : null;
+}
+
+/** An ISO time as UTC ("…Z"), or null when `raw` isn't one. */
+function isoTime(raw: unknown): string | null {
+  if (typeof raw !== "string" || raw.length > 40) return null;
+  const ms = Date.parse(raw);
+  return Number.isNaN(ms) ? null : new Date(ms).toISOString();
 }
 
 function optStr(raw: unknown, max = MAX_ID): string | null {
@@ -675,6 +684,24 @@ export const calendarLinksRoutes: FastifyPluginAsync = async (fastify) => {
     return reply.send(targetsState(db, auth.sub, auth.device_id, secret()));
   });
 
+  // How many existing events "Upcoming" (ending at or after `since`, the
+  // device's local midnight) and "All" would add to one calendar.
+  fastify.get<{ Querystring: Record<string, unknown> }>(
+    "/user/calendar-targets/existing",
+    { preHandler: targetLimit },
+    async (request, reply) => {
+      const auth = request.authUser as JWTPayload;
+      if (!auth.device_id) return reply.status(403).send({ error: "DESKTOP_REQUIRED" });
+      const q = request.query ?? {};
+      const calendarId = str(q.calendarId);
+      const since = isoTime(q.since);
+      if (q.provider !== PROVIDER || !calendarId || !since) {
+        return reply.status(400).send({ error: "CAL_TARGET_INVALID", message: "provider, calendarId and since required." });
+      }
+      return reply.send(existingCounts(db, auth.sub, calendarId, since));
+    },
+  );
+
   fastify.put<{ Body: Body }>(
     "/user/calendar-targets",
     { preHandler: targetLimit },
@@ -692,6 +719,15 @@ export const calendarLinksRoutes: FastifyPluginAsync = async (fastify) => {
       const rev = body.rev === undefined ? 0 : body.rev;
       if (!account || !calendarId || typeof body.enabled !== "boolean" || typeof rev !== "number") {
         return reply.status(400).send({ error: "invalid_request", message: "account, calendarId, enabled and rev required." });
+      }
+      // Existing events to add too: { since: ISO time | null (all) }, only when switching on.
+      let existingSince: string | null | undefined;
+      if (body.existing !== undefined && body.existing !== null) {
+        const since = typeof body.existing === "object" ? (body.existing as Record<string, unknown>).since ?? null : undefined;
+        existingSince = since === null ? null : isoTime(since) ?? undefined;
+        if (!body.enabled || existingSince === undefined) {
+          return reply.status(400).send({ error: "CAL_TARGET_INVALID", message: "existing needs enabled and a since time or null." });
+        }
       }
       if (!declaresLinks(db, userId, deviceId)) {
         const seen = linksDeviceSeenSince(db, userId, new Date(Date.now() - LINKS_DEVICE_SEEN_MS).toISOString());
@@ -752,6 +788,10 @@ export const calendarLinksRoutes: FastifyPluginAsync = async (fastify) => {
             )
             .all(userId, PROVIDER, calendarId);
           for (const row of pending) cancelPending(db, userId, row, "target_off", now);
+        }
+        if (body.enabled && existingSince !== undefined) {
+          const existingAdded = addExistingEvents(db, userId, { calendarId, accountRef }, existingSince, now);
+          return reply.send({ ok: true, ...targetsState(db, userId, deviceId, secret()), existingAdded });
         }
         return reply.send({ ok: true, ...targetsState(db, userId, deviceId, secret()) });
       })(answer);
