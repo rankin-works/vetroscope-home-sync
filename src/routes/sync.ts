@@ -97,7 +97,7 @@ const SEQ_TABLES = {
   },
   markers: {
     table: "sync_markers",
-    columns: "uuid, timestamp, end_timestamp, label, color, icon, deleted, origin, repeat_rule, created_at, updated_at",
+    columns: "uuid, timestamp, end_timestamp, label, color, icon, deleted, origin, repeat_rule, created_at, all_day_start, all_day_end, updated_at",
     limit: BATCH_SIZE,
   },
   notes: {
@@ -488,8 +488,9 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
     );
 
     // origin / repeat_rule (037) keep the stored value when the push has
-    // no key for them (the two trailing flags are 0). created_at is written
-    // on the first insert only.
+    // no key for them (their flags are 0). created_at is written on the
+    // first insert only. all_day_start / all_day_end (040) change together,
+    // only when their two flags are 1 (allDayFields).
     const upsertMarker = stmts.prepare<
       [
         string,
@@ -504,12 +505,16 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
         string | null,
         string | null,
         string | null,
+        string | null,
+        string | null,
+        number,
+        number,
         number,
         number,
       ]
     >(
-      `INSERT INTO sync_markers (uuid, user_id, timestamp, end_timestamp, label, color, icon, deleted, updated_at, origin, repeat_rule, created_at, seq)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(seq), 0) + 1 FROM sync_markers))
+      `INSERT INTO sync_markers (uuid, user_id, timestamp, end_timestamp, label, color, icon, deleted, updated_at, origin, repeat_rule, created_at, all_day_start, all_day_end, seq)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(seq), 0) + 1 FROM sync_markers))
        ON CONFLICT(uuid) DO UPDATE SET
          timestamp = excluded.timestamp,
          end_timestamp = excluded.end_timestamp,
@@ -519,6 +524,8 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
          deleted = excluded.deleted,
          origin = CASE WHEN ? = 1 THEN excluded.origin ELSE sync_markers.origin END,
          repeat_rule = CASE WHEN ? = 1 THEN excluded.repeat_rule ELSE sync_markers.repeat_rule END,
+         all_day_start = CASE WHEN ? = 1 THEN excluded.all_day_start ELSE sync_markers.all_day_start END,
+         all_day_end = CASE WHEN ? = 1 THEN excluded.all_day_end ELSE sync_markers.all_day_end END,
          updated_at = excluded.updated_at,
          seq = excluded.seq
        WHERE sync_markers.user_id = excluded.user_id
@@ -1008,6 +1015,7 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
             fillNewMarker(fastify.db, userId, calendars, m.uuid, c, createdBy, now);
           }
         }
+        const allDay = allDayFields(raw);
         upsertMarker.run(
           m.uuid,
           userId,
@@ -1021,8 +1029,12 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
           typeof raw.origin === "string" ? raw.origin : null,
           typeof raw.repeat_rule === "string" ? raw.repeat_rule : null,
           createdAt,
+          allDay.start,
+          allDay.end,
           "origin" in raw ? 1 : 0,
           "repeat_rule" in raw ? 1 : 0,
+          allDay.set,
+          allDay.set,
         );
         // A delete or restore that won last-write-wins moves the event's
         // copies; one that lost changed nothing, so it moves nothing.
@@ -1337,7 +1349,7 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
         ? pullBySeq<SyncMarker>(fastify.db, userId, "markers", seqCursors.markers)
         : fastify.db
         .prepare<[string, string, number], SyncMarker>(
-          `SELECT uuid, timestamp, end_timestamp, label, color, icon, deleted, origin, repeat_rule, created_at, updated_at
+          `SELECT uuid, timestamp, end_timestamp, label, color, icon, deleted, origin, repeat_rule, created_at, all_day_start, all_day_end, updated_at
            FROM sync_markers
            WHERE user_id = ? AND updated_at > ?
            ORDER BY updated_at ASC
@@ -2156,6 +2168,45 @@ export function wipeUserSyncRows(db: Database.Database, userId: string): void {
     resetLinks(db, userId, new Date().toISOString());
   });
   tx();
+}
+
+const YMD = /^(\d{4})-(\d{2})-(\d{2})$/;
+const MAX_ALL_DAY_SPAN_DAYS = 3660;
+
+/** UTC ms of a real calendar day written YYYY-MM-DD, or null (2026-02-30 is not one). */
+function dayMs(v: unknown): number | null {
+  if (typeof v !== "string") return null;
+  const m = YMD.exec(v);
+  if (!m) return null;
+  const ms = Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+  return new Date(ms).toISOString().slice(0, 10) === v ? ms : null;
+}
+
+/**
+ * What a pushed marker does to the stored all-day dates (040). No key or
+ * null keeps both stored values (an older client, or one that doesn't
+ * know); "" clears both; a real first day sets it, with an end that is
+ * null (one day) or a later real day at most MAX_ALL_DAY_SPAN_DAYS on.
+ * Anything else keeps both, so a bad value never wipes good dates.
+ */
+export function allDayFields(raw: Record<string, unknown>): {
+  set: 0 | 1;
+  start: string | null;
+  end: string | null;
+} {
+  const keep = { set: 0 as const, start: null, end: null };
+  const start = raw.all_day_start;
+  if (start === undefined || start === null) return keep;
+  if (start === "") return { set: 1, start: "", end: null };
+  const s = dayMs(start);
+  if (s === null) return keep;
+  const end = raw.all_day_end;
+  if (end === undefined || end === null || end === "") {
+    return { set: 1, start: start as string, end: null };
+  }
+  const e = dayMs(end);
+  if (e === null || e <= s || e - s > MAX_ALL_DAY_SPAN_DAYS * 86_400_000) return keep;
+  return { set: 1, start: start as string, end: end as string };
 }
 
 interface StoredMarker {

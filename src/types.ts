@@ -305,6 +305,12 @@ export interface SyncMarker {
   origin?: string | null;
   repeat_rule?: string | null;
   created_at?: string | null;
+  // Added in 040. An all-day event's first day (YYYY-MM-DD) and the day
+  // after its last (NULL for a one-day event); all_day_start is "" for an
+  // event known not to be all-day. A push without the key, or with null,
+  // keeps both stored values; "" clears both.
+  all_day_start?: string | null;
+  all_day_end?: string | null;
 }
 
 /** One copy of an event in one calendar (037), as desktops pull it. Only
