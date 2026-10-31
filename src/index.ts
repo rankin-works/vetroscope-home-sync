@@ -14,7 +14,10 @@ import { buildApp } from "./app.js";
 import { openDatabase } from "./db.js";
 import { loadConfig } from "./env.js";
 import { runMigrations } from "./lib/migrations.js";
-import { bootstrapServerState } from "./lib/server-state.js";
+import {
+  bootstrapServerState,
+  countUnreadableWraps,
+} from "./lib/server-state.js";
 import { VERSION } from "./version.js";
 
 async function main(): Promise<void> {
@@ -53,6 +56,20 @@ async function main(): Promise<void> {
         `[home-sync]   → Home Sync) or by POSTing to /setup. See\n` +
         `[home-sync]   docs/setup-guide.md for the full walkthrough.\n` +
         `[home-sync] ${bar}\n`,
+    );
+  }
+
+  const unreadable = countUnreadableWraps(
+    db,
+    bootstrap.jwtSecret,
+    config.syncDekKek,
+  );
+  if (unreadable > 0) {
+    process.stdout.write(
+      `[home-sync] Warning: ${unreadable} stored encryption key(s) or calendar connection(s) ` +
+        "can't be opened with this server's JWT secret or VS_SYNC_DEK_KEK. Users with a " +
+        "lost key can't unlock with sign-in recovery until a computer that still has it " +
+        "stores it again; calendar connections need reconnecting. See docs/troubleshooting.md.\n",
     );
   }
 

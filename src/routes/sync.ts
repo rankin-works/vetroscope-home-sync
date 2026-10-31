@@ -60,6 +60,7 @@ import {
   type CalendarContext,
   type MarkerForFill,
 } from "../lib/calendar-links.js";
+import { nextSeqSql, raiseSeqFloors } from "../lib/seq.js";
 import { compareSemver } from "../lib/semver.js";
 import { SERVER_MIN_CLIENT_VERSION } from "./server-info.js";
 
@@ -74,6 +75,8 @@ function nameHashes(raw: unknown): string[] {
     .slice(0, BATCH_SIZE);
 }
 const OVERRIDE_PULL_LIMIT = 500;
+/** How long a dated reminder claim is kept (see /sync/reminder-claim). */
+export const CLAIM_RETENTION_DAYS = 45;
 // Settings are a small allowlist (see SYNCED_SETTING_KEYS) so the legacy
 // behavior was "no LIMIT" — it always fit in one response. With the
 // compound cursor we still cap to a deterministic page size so a future
@@ -147,7 +150,7 @@ const SEQ_TABLES = {
   },
   reminders: {
     table: "sync_reminders",
-    columns: "uuid, title, body, kind, fire_at, weekdays, time_of_day, end_time_of_day, start_date, end_date, tag_uuid, threshold_seconds, period, icon_data_url, interval_seconds, app_name, project, goal_uuid, goal_notify_half, goal_notify_complete, enabled, deleted, last_fired_at, updated_at",
+    columns: "uuid, title, body, kind, fire_at, weekdays, time_of_day, end_time_of_day, start_date, end_date, tag_uuid, threshold_seconds, period, icon_data_url, interval_seconds, app_name, project, goal_uuid, goal_notify_half, goal_notify_complete, enabled, deleted, last_fired_at, updated_at, note_uuid",
     limit: BATCH_SIZE,
   },
   reminder_events: {
@@ -267,40 +270,54 @@ export function parseEntryCursor(raw: unknown): EntryCursor | null {
   if (!raw || typeof raw !== "object") return null;
   const c = raw as Record<string, unknown>;
   if (typeof c.seq === "number" && Number.isSafeInteger(c.seq) && c.seq >= 0) return { seq: c.seq };
-  if (typeof c.after === "string" && !Number.isNaN(Date.parse(c.after))) return { after: c.after };
+  if (typeof c.after === "string" && !Number.isNaN(Date.parse(c.after))) {
+    // uuid and until are what this server sent with the previous page. A
+    // malformed one is dropped, and the page runs as it did without it.
+    const out: { after: string; uuid?: string; until?: number } = { after: c.after };
+    if (typeof c.uuid === "string" && c.uuid !== "" && c.uuid.length <= 128) out.uuid = c.uuid;
+    if (typeof c.until === "number" && Number.isSafeInteger(c.until) && c.until >= 0) out.until = c.until;
+    return out;
+  }
   return null;
 }
 
 /** Where the next pull resumes entries. A full page continues from its last
- *  row (by seq, or by updated_at while still catching up on rows older than
- *  seq). Otherwise the client is caught up and moves to seq at `maxSeq`,
- *  read before the entries were: any row saved since got a higher number,
- *  so it comes next time instead of being skipped. */
+ *  row: by seq, or, while still catching up on rows older than seq, by
+ *  (updated_at, uuid), so rows sharing the last row's updated_at come on the
+ *  next page instead of being skipped. Otherwise the client is caught up and
+ *  moves to seq. From a seq cursor that's `maxSeq`, read before the entries
+ *  were: any row saved since got a higher number, so it comes next time.
+ *  From a replay it's the MAX(seq) read when the replay started (`until`),
+ *  so rows pushed during the replay with an updated_at behind its position
+ *  come by seq; the rows already sent again are merged by last write wins. */
 export function nextEntryCursorAfter(
   current: EntryCursor | null,
-  entries: Array<{ updated_at: string; seq?: number | null }>,
+  entries: Array<{ uuid: string; updated_at: string; seq?: number | null }>,
   hitLimit: boolean,
   maxSeq: number,
 ): EntryCursor {
-  const bySeq = current !== null && "seq" in current;
   const last = entries[entries.length - 1];
-  if (hitLimit && last) {
-    if (!bySeq) return { after: last.updated_at };
-    if (typeof last.seq === "number") return { seq: last.seq };
+  if (current !== null && "seq" in current) {
+    if (hitLimit && typeof last?.seq === "number") return { seq: last.seq };
+    return { seq: Math.max(maxSeq, current.seq) };
   }
-  return { seq: Math.max(maxSeq, bySeq ? current.seq : 0) };
+  const until = current?.until ?? maxSeq;
+  if (hitLimit && last) return { after: last.updated_at, uuid: last.uuid, until };
+  return { seq: until };
 }
 
 // Allowlist of sync-eligible setting keys. The client has historically
 // attempted to push additional keys; rejecting unknown ones keeps the
 // server-side schema stable and the payload bounded. A key missing here is
-// silently rejected on push even when the client sends it, so this set has
-// to grow before a new synced setting will replicate.
+// rejected on push and named in the response's `rejected_settings`, so the
+// client keeps it unsent and tries again once the server knows it, instead
+// of treating it as saved.
 const SYNCED_SETTING_KEYS = new Set([
   "ignored_apps",
   "ignored_projects",
   "ignored_breakdown_patterns",
   "ignored_sub_projects",
+  "ignored_all_breakdowns",
 ]);
 
 export const syncRoutes: FastifyPluginAsync = async (fastify) => {
@@ -353,9 +370,9 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
 
     const stmts = fastify.db;
     // Every write to a pulled table sets `seq` to the next number from that
-    // table's counter (032 / 034), so a pull that pages by seq sees it. A
-    // write that skips it never reaches desktops already past the row's
-    // old number.
+    // table's counter (032 / 034, nextSeqSql), so a pull that pages by seq
+    // sees it. A write that skips it never reaches desktops already past
+    // the row's old number.
 
     const upsertEntry = stmts.prepare<
       [
@@ -394,10 +411,11 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
       // rather than overwriting it. Every uuid-keyed upsert below carries
       // the same guard.
       //
-      // seq: the next number from the shared counter (032), taken as the
-      // row is written, so pulls page by save order.
+      // seq: the next number from the shared counter (032, above the
+      // floor kept since 038), taken as the row is written, so pulls page
+      // by save order.
       `INSERT INTO sync_entries (uuid, user_id, device_id, updated_by_device_id, timestamp, app_name, window_title, project, sub_project, is_adobe, is_passive, tag_uuid, platform, updated_at, seq)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(seq), 0) + 1 FROM sync_entries))
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ${nextSeqSql("sync_entries")})
        ON CONFLICT(uuid) DO UPDATE SET
          sub_project = excluded.sub_project,
          is_passive = excluded.is_passive,
@@ -435,7 +453,7 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
       // sub-breakdowns / breakdowns. archived (008) marks the tag
       // hidden-but-preserved client-side.
       `INSERT INTO sync_tags (uuid, user_id, name, color, sticky, sticky_subprojects, sticky_projects, icon_data_url, parent_uuid, deleted, archived, merged_into_uuid, updated_at, seq)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(seq), 0) + 1 FROM sync_tags))
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ${nextSeqSql("sync_tags")})
        ON CONFLICT(uuid) DO UPDATE SET
          name = excluded.name,
          color = excluded.color,
@@ -472,7 +490,7 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
       // can't clobber the original creation timestamp recorded by the
       // first device to push the goal.
       `INSERT INTO sync_goals (uuid, user_id, type, app_name, tag_uuid, target_seconds, enabled, deleted, created_at, updated_at, seq)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(seq), 0) + 1 FROM sync_goals))
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ${nextSeqSql("sync_goals")})
        ON CONFLICT(uuid) DO UPDATE SET
          type = excluded.type,
          app_name = excluded.app_name,
@@ -515,7 +533,7 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
       ]
     >(
       `INSERT INTO sync_markers (uuid, user_id, timestamp, end_timestamp, label, color, icon, deleted, updated_at, origin, repeat_rule, created_at, all_day_start, all_day_end, seq)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(seq), 0) + 1 FROM sync_markers))
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ${nextSeqSql("sync_markers")})
        ON CONFLICT(uuid) DO UPDATE SET
          timestamp = excluded.timestamp,
          end_timestamp = excluded.end_timestamp,
@@ -556,7 +574,7 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
          uuid, user_id, title, body, timestamp, end_timestamp,
          marker_uuid, folder_uuid, pinned, deleted, updated_at, seq
        )
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(seq), 0) + 1 FROM sync_notes))
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ${nextSeqSql("sync_notes")})
        ON CONFLICT(uuid) DO UPDATE SET
          title = excluded.title,
          body = excluded.body,
@@ -578,7 +596,7 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
       `INSERT INTO sync_note_folders (
          uuid, user_id, name, parent_uuid, color, deleted, updated_at, seq
        )
-       VALUES (?, ?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(seq), 0) + 1 FROM sync_note_folders))
+       VALUES (?, ?, ?, ?, ?, ?, ?, ${nextSeqSql("sync_note_folders")})
        ON CONFLICT(uuid) DO UPDATE SET
          name = excluded.name,
          parent_uuid = excluded.parent_uuid,
@@ -598,7 +616,7 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
       [string, string, string, string, string, string, number, number, string]
     >(
       `INSERT INTO sync_goal_achievements (uuid, user_id, goal_uuid, goal_snapshot, date, achieved_at, current_seconds, deleted, updated_at, seq)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(seq), 0) + 1 FROM sync_goal_achievements))
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ${nextSeqSql("sync_goal_achievements")})
        ON CONFLICT(user_id, goal_uuid, date) DO UPDATE SET
          goal_snapshot = excluded.goal_snapshot,
          achieved_at = excluded.achieved_at,
@@ -612,7 +630,7 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
 
     const upsertSetting = stmts.prepare<[string, string, string, string]>(
       `INSERT INTO sync_settings (user_id, key, value, updated_at, seq)
-       VALUES (?, ?, ?, ?, (SELECT COALESCE(MAX(seq), 0) + 1 FROM sync_settings))
+       VALUES (?, ?, ?, ?, ${nextSeqSql("sync_settings")})
        ON CONFLICT(user_id, key) DO UPDATE SET
          value = excluded.value,
          updated_at = excluded.updated_at,
@@ -624,7 +642,7 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
       [string, string, string, string, string, string, string]
     >(
       `INSERT INTO sync_icons (name_hash, user_id, app_name, platform, data_url, dominant_color, updated_at, seq)
-       VALUES (?, ?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(seq), 0) + 1 FROM sync_icons))
+       VALUES (?, ?, ?, ?, ?, ?, ?, ${nextSeqSql("sync_icons")})
        ON CONFLICT(name_hash, user_id) DO UPDATE SET
          app_name = excluded.app_name,
          platform = excluded.platform,
@@ -647,7 +665,7 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
       ]
     >(
       `INSERT INTO sync_overrides (name_hash, user_id, app_name, display_name, color, icon_data_url, updated_at, seq)
-       VALUES (?, ?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(seq), 0) + 1 FROM sync_overrides))
+       VALUES (?, ?, ?, ?, ?, ?, ?, ${nextSeqSql("sync_overrides")})
        ON CONFLICT(name_hash, user_id) DO UPDATE SET
          app_name = excluded.app_name,
          display_name = excluded.display_name,
@@ -665,7 +683,7 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
       [string, string, string | null, string, string | null, number, string]
     >(
       `INSERT INTO sync_tag_sticky_exclusions (uuid, user_id, tag_uuid, app_name, project, deleted, updated_at, seq)
-       VALUES (?, ?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(seq), 0) + 1 FROM sync_tag_sticky_exclusions))
+       VALUES (?, ?, ?, ?, ?, ?, ?, ${nextSeqSql("sync_tag_sticky_exclusions")})
        ON CONFLICT(uuid) DO UPDATE SET
          tag_uuid = excluded.tag_uuid,
          app_name = excluded.app_name,
@@ -682,7 +700,7 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
       [string, string, string | null, string, number, string]
     >(
       `INSERT INTO sync_tag_sticky_project_apps (uuid, user_id, tag_uuid, app_name, deleted, updated_at, seq)
-       VALUES (?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(seq), 0) + 1 FROM sync_tag_sticky_project_apps))
+       VALUES (?, ?, ?, ?, ?, ?, ${nextSeqSql("sync_tag_sticky_project_apps")})
        ON CONFLICT(uuid) DO UPDATE SET
          tag_uuid = excluded.tag_uuid,
          app_name = excluded.app_name,
@@ -698,7 +716,7 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
       [string, string, string | null, string, string, number, string]
     >(
       `INSERT INTO sync_tag_sticky_subproject_scopes (uuid, user_id, tag_uuid, app_name, project, deleted, updated_at, seq)
-       VALUES (?, ?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(seq), 0) + 1 FROM sync_tag_sticky_subproject_scopes))
+       VALUES (?, ?, ?, ?, ?, ?, ?, ${nextSeqSql("sync_tag_sticky_subproject_scopes")})
        ON CONFLICT(uuid) DO UPDATE SET
          tag_uuid = excluded.tag_uuid,
          app_name = excluded.app_name,
@@ -732,7 +750,7 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
       ]
     >(
       `INSERT INTO sync_media_links (uuid, user_id, app_name, project, sub_project, url, kind, first_seen, last_seen, deleted, updated_at, seq)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(seq), 0) + 1 FROM sync_media_links))
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ${nextSeqSql("sync_media_links")})
        ON CONFLICT(uuid) DO UPDATE SET
          app_name = excluded.app_name,
          project = excluded.project,
@@ -765,7 +783,7 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
       ]
     >(
       `INSERT INTO sync_app_categories (uuid, user_id, app_name, project, category_id, confidence, source, model, deleted, updated_at, seq)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(seq), 0) + 1 FROM sync_app_categories))
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ${nextSeqSql("sync_app_categories")})
        ON CONFLICT(uuid) DO UPDATE SET
          app_name = excluded.app_name,
          project = excluded.project,
@@ -810,6 +828,7 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
         number, // deleted
         string | null, // last_fired_at
         string, // updated_at
+        string | null, // note_uuid ("" = no note, null = keep)
       ]
     >(
       `INSERT INTO sync_reminders (
@@ -817,9 +836,9 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
          end_time_of_day, start_date, end_date, tag_uuid, threshold_seconds,
          period, icon_data_url, interval_seconds, app_name, project, goal_uuid,
          goal_notify_half, goal_notify_complete, enabled, deleted,
-         last_fired_at, updated_at, seq
+         last_fired_at, updated_at, note_uuid, seq
        )
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(seq), 0) + 1 FROM sync_reminders))
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ${nextSeqSql("sync_reminders")})
        ON CONFLICT(uuid) DO UPDATE SET
          title = excluded.title,
          body = excluded.body,
@@ -844,6 +863,8 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
          deleted = excluded.deleted,
          last_fired_at = excluded.last_fired_at,
          updated_at = excluded.updated_at,
+         -- A push without the note (an older client) keeps the stored one.
+         note_uuid = COALESCE(excluded.note_uuid, sync_reminders.note_uuid),
          seq = excluded.seq
        WHERE sync_reminders.user_id = excluded.user_id
          AND excluded.updated_at > sync_reminders.updated_at`,
@@ -870,7 +891,7 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
          uuid, user_id, reminder_uuid, title, body, icon_data_url, fired_at,
          read_at, dismissed_at, deleted, updated_at, seq
        )
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(seq), 0) + 1 FROM sync_reminder_events))
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ${nextSeqSql("sync_reminder_events")})
        ON CONFLICT(uuid) DO UPDATE SET
          reminder_uuid = excluded.reminder_uuid,
          title = excluded.title,
@@ -890,7 +911,7 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
       [string, string, number, string]
     >(
       `INSERT INTO sync_entry_dismissals (uuid, user_id, deleted, updated_at, seq)
-       VALUES (?, ?, ?, ?, (SELECT COALESCE(MAX(seq), 0) + 1 FROM sync_entry_dismissals))
+       VALUES (?, ?, ?, ?, ${nextSeqSql("sync_entry_dismissals")})
        ON CONFLICT(uuid) DO UPDATE SET
          deleted = excluded.deleted,
          updated_at = excluded.updated_at,
@@ -937,6 +958,7 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
     const linksMode = (links?.converted_at ?? null) !== null;
     const createdBy = declaresLinks(fastify.db, userId, callerDeviceId) ? "desktop" : "server";
     let calendars: CalendarContext | null = null;
+    const rejectedSettings: string[] = [];
 
     const tx = fastify.db.transaction(() => {
       for (const e of (body.entries ?? []).slice(0, BATCH_SIZE)) {
@@ -1092,7 +1114,12 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
         );
       }
       for (const s of body.settings ?? []) {
-        if (!SYNCED_SETTING_KEYS.has(s.key)) continue;
+        if (!SYNCED_SETTING_KEYS.has(s.key)) {
+          if (typeof s.key === "string" && rejectedSettings.length < SETTING_LIMIT) {
+            rejectedSettings.push(s.key.slice(0, 128));
+          }
+          continue;
+        }
         upsertSetting.run(userId, s.key, s.value, s.updated_at || now);
       }
       for (const i of (body.icons ?? []).slice(0, ICON_LIMIT)) {
@@ -1119,6 +1146,10 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
       }
       // Rows the client stored under the old unkeyed hash of the app name
       // and has since uploaded under a keyed one: delete the old copies.
+      // Deleting the row with the highest seq would lower the counter, so
+      // the floor is raised first.
+      if (removedIcons.length > 0) raiseSeqFloors(fastify.db, ["sync_icons"]);
+      if (removedOverrides.length > 0) raiseSeqFloors(fastify.db, ["sync_overrides"]);
       for (const h of removedIcons) removeIcon.run(userId, h);
       for (const h of removedOverrides) removeOverride.run(userId, h);
       for (const tse of (body.tag_sticky_exclusions ?? []).slice(
@@ -1218,6 +1249,7 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
           r.deleted,
           r.last_fired_at ?? null,
           r.updated_at || now,
+          typeof r.note_uuid === "string" ? r.note_uuid.slice(0, 64) : null,
         );
       }
       for (const event of (body.reminder_events ?? []).slice(0, BATCH_SIZE)) {
@@ -1261,6 +1293,9 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
       cursor: now,
       // Tells the client this server handles icons_remove / overrides_remove.
       removed: { icons: removedIcons.length, overrides: removedOverrides.length },
+      // Setting keys this server doesn't sync. The client leaves them unsent
+      // rather than marking them saved.
+      ...(rejectedSettings.length > 0 ? { rejected_settings: rejectedSettings } : {}),
     });
   });
 
@@ -1278,8 +1313,9 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
     // machine. NULL writer (pre-migration) included defensively.
     //
     // Entries page by their own cursor when the client sends one (see
-    // EntryCursor): by seq once caught up, by updated_at before that. Older
-    // clients send none and page entries by the shared `cursor` as before.
+    // EntryCursor): by seq once caught up, by (updated_at, uuid) before
+    // that. Older clients send none and page entries by the shared `cursor`
+    // as before.
     // MAX(seq) is read first: every row numbered up to it is already
     // saved, so the caught-up cursor can't pass a row this read missed.
     const entryCursor = parseEntryCursor(body.entry_cursor);
@@ -1301,13 +1337,25 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
                LIMIT ?`,
             )
             .all(userId, entryCursor.seq, deviceId, BATCH_SIZE)
+        : entryCursor?.uuid !== undefined
+        ? fastify.db
+            .prepare<[string, string, string, string, string, number], SyncEntry>(
+              `SELECT uuid, device_id, timestamp, app_name, window_title, project, sub_project, is_adobe, is_passive, tag_uuid, platform, updated_at, seq
+               FROM sync_entries
+               WHERE user_id = ?
+                 AND (updated_at > ? OR (updated_at = ? AND uuid > ?))
+                 AND (updated_by_device_id IS NULL OR updated_by_device_id != ?)
+               ORDER BY updated_at ASC, uuid ASC
+               LIMIT ?`,
+            )
+            .all(userId, entryCursor.after, entryCursor.after, entryCursor.uuid, deviceId, BATCH_SIZE)
         : fastify.db
             .prepare<[string, string, string, number], SyncEntry>(
               `SELECT uuid, device_id, timestamp, app_name, window_title, project, sub_project, is_adobe, is_passive, tag_uuid, platform, updated_at, seq
                FROM sync_entries
                WHERE user_id = ? AND updated_at > ?
                  AND (updated_by_device_id IS NULL OR updated_by_device_id != ?)
-               ORDER BY updated_at ASC
+               ORDER BY updated_at ASC, uuid ASC
                LIMIT ?`,
             )
             .all(userId, entryCursor?.after ?? cursor, deviceId, BATCH_SIZE);
@@ -1733,7 +1781,7 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
                       end_time_of_day, start_date, end_date, tag_uuid, threshold_seconds,
                       period, icon_data_url, interval_seconds, app_name, project, goal_uuid,
                       goal_notify_half, goal_notify_complete, enabled, deleted,
-                      last_fired_at, updated_at
+                      last_fired_at, updated_at, note_uuid
                FROM sync_reminders
                WHERE user_id = ?
                  AND (updated_at > ? OR (updated_at = ? AND uuid > ?))
@@ -1753,7 +1801,7 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
                       end_time_of_day, start_date, end_date, tag_uuid, threshold_seconds,
                       period, icon_data_url, interval_seconds, app_name, project, goal_uuid,
                       goal_notify_half, goal_notify_complete, enabled, deleted,
-                      last_fired_at, updated_at
+                      last_fired_at, updated_at, note_uuid
                FROM sync_reminders
                WHERE user_id = ? AND updated_at > ?
                ORDER BY updated_at ASC, uuid ASC
@@ -2124,6 +2172,23 @@ export const syncRoutes: FastifyPluginAsync = async (fastify) => {
            ON CONFLICT(user_id, occurrence_key) DO NOTHING`,
         )
         .run(auth.sub, occurrenceKey, auth.device_id, now);
+      // Each dated occurrence (an interval slot, a day, a week or a month)
+      // leaves a row, so old ones are dropped as new ones come in. A claim
+      // only has to outlive its period, and the longest is a month, so
+      // anything claimed over CLAIM_RETENTION_DAYS ago goes. A one-time
+      // alert's claim (":once") never expires: it would fire again.
+      if (inserted.changes > 0) {
+        const cutoff = new Date(
+          Date.parse(now) - CLAIM_RETENTION_DAYS * 86_400_000,
+        ).toISOString();
+        fastify.db
+          .prepare<[string, string]>(
+            `DELETE FROM sync_reminder_claims
+              WHERE user_id = ? AND claimed_at < ?
+                AND occurrence_key NOT LIKE '%:once'`,
+          )
+          .run(auth.sub, cutoff);
+      }
       const row = fastify.db
         .prepare<
           [string, string],
@@ -2165,6 +2230,9 @@ export function wipeUserSyncRows(db: Database.Database, userId: string): void {
     "sync_entry_dismissals",
   ];
   const tx = db.transaction(() => {
+    // The other desktops keep their seq cursors through a reset, so the
+    // numbers the re-pushed rows get must stay above them (038).
+    raiseSeqFloors(db);
     for (const t of tables) {
       db.prepare(`DELETE FROM ${t} WHERE user_id = ?`).run(userId);
     }

@@ -247,6 +247,9 @@ export interface SyncReminder {
    *  online later. Optional on the wire — pre-010 servers and
    *  pre-fix clients omit it. */
   last_fired_at?: string | null;
+  /** Cleartext uuid of the note this alert belongs to (039). "" means no
+   *  note; a push without it (null or absent) keeps the stored value. */
+  note_uuid?: string | null;
   updated_at: string;
 }
 
@@ -455,7 +458,16 @@ export interface CompoundCursor {
 // Where a pull resumes entries (032). `after` pages by updated_at (rows
 // written before seq existed, or a full replay); `seq` pages by the
 // server-assigned save order and can't skip a row.
-export type EntryCursor = { after: string } | { seq: number };
+//
+// While paging by `after`, `uuid` is the last row's uuid, so rows that share
+// the boundary updated_at (one bulk retag stamps hundreds alike) aren't
+// skipped, and `until` is the entries' MAX(seq) when the replay started: a
+// finished replay moves to seq from there, so rows pushed during it with an
+// older updated_at still arrive. Clients send both back as they got them;
+// one that drops them pages as before.
+export type EntryCursor =
+  | { after: string; uuid?: string; until?: number }
+  | { seq: number };
 
 export interface PullPayload {
   cursor: string | null;

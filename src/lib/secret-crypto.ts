@@ -16,7 +16,9 @@ import {
 //   v1 (`iv:ct`)    — key derived from the server's JWT secret. The original
 //                     scheme, and still the default when no dedicated KEK is
 //                     configured. Ties secret-at-rest to the signing secret:
-//                     rotating the JWT secret makes these blobs unreadable.
+//                     a new JWT secret can't read these blobs, so changing it
+//                     goes through rotateJwtSecret (server-state.ts), which
+//                     re-wraps them with the old one first.
 //   v2 (`v2:iv:ct`) — key supplied out-of-band via VS_SYNC_DEK_KEK. Independent
 //                     of the JWT secret, so signing-key rotation is safe.
 //
@@ -68,6 +70,12 @@ export function decryptSyncDek(
   kek: string | null = null,
 ): string {
   return decryptWithPurpose(blob, jwtSecret, "sync-dek", kek);
+}
+
+/** Whether a blob's wrapping key comes from the JWT secret (v1), so
+ *  changing the secret needs it re-wrapped (see rotateJwtSecret). */
+export function isJwtSecretBound(blob: string): boolean {
+  return !blob.startsWith(`${V2_PREFIX}:`);
 }
 
 function encryptWithPurpose(

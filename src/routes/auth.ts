@@ -338,15 +338,17 @@ export const authRoutes: FastifyPluginAsync = async (fastify) => {
         return reply.status(401).send({ error: "refresh_token_expired" });
       }
 
-      // Single-use rotation: drop the row we just consumed before issuing.
-      fastify.db
-        .prepare<[string]>("DELETE FROM refresh_tokens WHERE token_hash = ?")
-        .run(tokenHash);
+      // The presented token isn't deleted here: issueTokens keeps it as the
+      // grace predecessor of the token it mints, and drops every other token
+      // for the device.
 
       // A removed device's refresh tokens are deleted with it, but refresh
       // tokens have no foreign key to devices, so never renew a session for
       // a device that's no longer the user's.
       if (findDevice(fastify.db, stored.id, stored.device_id) === undefined) {
+        fastify.db
+          .prepare<[string]>("DELETE FROM refresh_tokens WHERE token_hash = ?")
+          .run(tokenHash);
         return reply.status(401).send({ error: "invalid_refresh_token" });
       }
 
@@ -361,6 +363,7 @@ export const authRoutes: FastifyPluginAsync = async (fastify) => {
         fastify.jwtSecret,
         stored,
         deviceId,
+        tokenHash,
       );
       return reply.send({
         user: publicUser(stored),

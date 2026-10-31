@@ -79,24 +79,47 @@ describe("auth flow", () => {
     expect(res.json().error).toBe("invalid_credentials");
   });
 
-  it("refresh rotates the token and invalidates the old one", async () => {
+  it("refresh rotates the token and keeps the old one only until the new one is used", async () => {
     const admin = await bootstrapAdmin(h);
-    const first = await h.app.inject({
-      method: "POST",
-      url: "/auth/refresh",
-      payload: { refresh_token: admin.refreshToken },
-    });
+    const refresh = (refresh_token: string) =>
+      h.app.inject({ method: "POST", url: "/auth/refresh", payload: { refresh_token } });
+    const first = await refresh(admin.refreshToken);
     expect(first.statusCode).toBe(200);
     // Refresh response also carries refresh_expires_at so multi-target
     // clients can update the per-target descriptor's cached expiry on
     // every rotation, not just on initial login.
     expect(first.json().refresh_expires_at).toMatch(/^\d{4}-\d{2}-\d{2}T/);
-    const second = await h.app.inject({
-      method: "POST",
-      url: "/auth/refresh",
-      payload: { refresh_token: admin.refreshToken },
-    });
-    expect(second.statusCode).toBe(401);
+    const t1 = first.json().refreshToken as string;
+    expect(t1).not.toBe(admin.refreshToken);
+
+    // Using the new token retires its predecessor.
+    const second = await refresh(t1);
+    expect(second.statusCode).toBe(200);
+    expect((await refresh(admin.refreshToken)).statusCode).toBe(401);
+  });
+
+  it("a refresh whose response was lost can be retried with the old token", async () => {
+    const admin = await bootstrapAdmin(h);
+    const refresh = (refresh_token: string) =>
+      h.app.inject({ method: "POST", url: "/auth/refresh", payload: { refresh_token } });
+    // The desktop never saw this response, so it still holds the old token.
+    const lost = await refresh(admin.refreshToken);
+    expect(lost.statusCode).toBe(200);
+    const retry = await refresh(admin.refreshToken);
+    expect(retry.statusCode).toBe(200);
+    const t2 = retry.json().refreshToken as string;
+    // The retry replaces the lost token: the device has its predecessor and
+    // the newest token, never more.
+    expect((await refresh(lost.json().refreshToken as string)).statusCode).toBe(401);
+    const live = h.db
+      .prepare<[string], { n: number }>(
+        "SELECT COUNT(*) AS n FROM refresh_tokens WHERE device_id = ?",
+      )
+      .get(admin.deviceId);
+    expect(live?.n).toBe(2);
+    expect((await refresh(t2)).statusCode).toBe(200);
+    // Two rotations stale is refused.
+    expect((await refresh(admin.refreshToken)).statusCode).toBe(401);
   });
 
   it("refresh and login store an encrypted device name, never a plaintext one", async () => {

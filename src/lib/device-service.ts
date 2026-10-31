@@ -17,6 +17,9 @@ export class DeviceLimitReachedError extends Error {
   }
 }
 
+const DEVICE_UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 export interface RegisterDeviceInput {
   id: string | null;
   deviceName: string;
@@ -27,12 +30,27 @@ export interface RegisterDeviceInput {
   appVersion?: string | null;
 }
 
+// The device id is a primary key across every account on the server, so
+// the client's id is only a suggestion. Inserting it as sent failed every
+// sign-in (500) once another account already had a row under it, as when
+// one computer signs in to a second account on the same server, and on
+// register it left the new account behind with its invite spent. The id
+// the device ends up with goes back in the response, and the desktop moves
+// the session to the id it uses itself on refresh (adoptDeviceId).
 export function registerDevice(
   db: DB,
   userId: string,
   input: RegisterDeviceInput,
 ): string {
-  const id = input.id ?? randomUUID();
+  let id: string = randomUUID();
+  if (input.id !== null && DEVICE_UUID_RE.test(input.id)) {
+    const taken = db
+      .prepare<[string], { one: number }>(
+        "SELECT 1 AS one FROM devices WHERE id = ?",
+      )
+      .get(input.id);
+    if (taken === undefined) id = input.id;
+  }
   db.prepare<[string, string, string, string, string | null]>(
     "INSERT INTO devices (id, user_id, device_name, platform, app_version) VALUES (?, ?, ?, ?, ?)",
   ).run(id, userId, input.deviceName, input.platform, input.appVersion ?? null);
@@ -111,9 +129,6 @@ export function listDevices(db: DB, userId: string): DeviceRow[] {
     )
     .all(userId);
 }
-
-const DEVICE_UUID_RE =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 // Move a desktop's session from the device id this server gave it
 // (`fromId`) to the id the desktop itself uses (`toId`), so every server it

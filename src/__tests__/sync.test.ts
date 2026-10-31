@@ -783,7 +783,8 @@ describe("/sync", () => {
     });
     expect(pull.statusCode).toBe(200);
     const body = pull.json();
-    expect(body.reminders).toEqual([reminder]);
+    // note_uuid (039) comes back null for an alert pushed without one.
+    expect(body.reminders).toEqual([{ ...reminder, note_uuid: null }]);
     expect(body.reminder_events).toEqual([event]);
   });
 

@@ -8,7 +8,9 @@
 -- device's cursor and was never pulled.
 --
 -- seq is assigned on every insert or update from one counter across all
--- users (MAX(seq) + 1, so a user's numbers never restart after a wipe).
+-- users (MAX(seq) + 1). On its own that counter goes back down when rows
+-- are deleted (a wipe of the only account sets it back to 0); 038 adds the
+-- floor that keeps it from doing so.
 -- Rows written before this migration keep seq NULL; clients reach them by
 -- updated_at and switch to seq once caught up (see /sync/pull).
 

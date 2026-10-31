@@ -45,7 +45,7 @@ Usage:
   vhs-cli revoke-tokens --email <e>
   vhs-cli promote --email <e>
   vhs-cli demote  --email <e>
-  vhs-cli rotate-jwt-secret [--confirm]
+  vhs-cli rotate-jwt-secret --confirm [--secret <s>|-] [--allow-unreadable]
   vhs-cli version
   vhs-cli help
 
@@ -191,9 +191,17 @@ async function main(): Promise<void> {
         )
         .get(email.toLowerCase());
       if (row === undefined) die(`No user with email ${email}`);
-      const res = db
-        .prepare<[string]>("DELETE FROM refresh_tokens WHERE user_id = ?")
-        .run(row.id);
+      // Deleting the refresh tokens stops renewals; the token_version bump
+      // also stops the access tokens already handed out, which are
+      // otherwise good for up to an hour.
+      const res = db.transaction(() => {
+        db.prepare<[string]>(
+          "UPDATE users SET token_version = token_version + 1, updated_at = datetime('now') WHERE id = ?",
+        ).run(row.id);
+        return db
+          .prepare<[string]>("DELETE FROM refresh_tokens WHERE user_id = ?")
+          .run(row.id);
+      })();
       process.stdout.write(
         `Revoked ${res.changes} refresh token(s) for ${email}.\n`,
       );
@@ -204,11 +212,15 @@ async function main(): Promise<void> {
     case "demote": {
       const email = requireString(flags, "email");
       const nextRole: Role = cmd === "promote" ? "admin" : "user";
+      // A demotion also bumps token_version, so the access tokens that still
+      // say admin stop working now rather than when they expire. Sessions
+      // renew with the new role on their next refresh.
       const res = db
-        .prepare<[Role, string]>(
-          "UPDATE users SET role = ?, updated_at = datetime('now') WHERE email = ?",
+        .prepare<[Role, number, string]>(
+          `UPDATE users SET role = ?, token_version = token_version + ?,
+             updated_at = datetime('now') WHERE email = ?`,
         )
-        .run(nextRole, email.toLowerCase());
+        .run(nextRole, cmd === "demote" ? 1 : 0, email.toLowerCase());
       if (res.changes === 0) die(`No user with email ${email}`);
       process.stdout.write(`${email} is now ${nextRole}.\n`);
       break;
@@ -222,14 +234,45 @@ async function main(): Promise<void> {
         process.exit(2);
       }
       const { generateToken } = await import("../lib/crypto.js");
-      const { setState, SERVER_STATE_KEYS } = await import(
-        "../lib/server-state.js"
-      );
-      const next = generateToken(32);
-      setState(db, SERVER_STATE_KEYS.jwtSecret, next);
-      db.prepare("DELETE FROM refresh_tokens").run();
+      const { rotateJwtSecret } = await import("../lib/server-state.js");
+      // --secret sets a chosen value (from stdin with "-"), for installs that
+      // pin it with VS_JWT_SECRET: set the variable to the same value before
+      // the server next starts, since a different one is refused once keys
+      // are wrapped with it.
+      let next: string;
+      if (flags.secret === undefined) {
+        // A random secret can't match a pinned VS_JWT_SECRET, and the server
+        // refuses to start while they differ with keys wrapped.
+        if (config.jwtSecretOverride !== null) {
+          die(
+            "VS_JWT_SECRET is set, so a random secret would stop the server from starting. " +
+              "Rotate to a value you choose with --secret - (read from stdin), then set " +
+              "VS_JWT_SECRET to it. See docs/troubleshooting.md.",
+          );
+        }
+        next = generateToken(32);
+      } else {
+        const raw = typeof flags.secret === "string" ? flags.secret : "";
+        next = resolvePassword(raw);
+        if (next.length < 32) die("--secret must be at least 32 characters.");
+      }
+      // The old secret opens the stored wraps, and they're re-wrapped with
+      // the new one in the same transaction (rotateJwtSecret).
+      const result = rotateJwtSecret(db, next, {
+        syncDekKek: config.syncDekKek,
+        allowUnreadable: flags["allow-unreadable"] === true,
+      });
       process.stdout.write(
-        "JWT secret rotated. All refresh tokens revoked — users must re-authenticate.\n",
+        `JWT secret rotated. Re-wrapped ${result.syncKeys} encryption key(s) and ` +
+          `${result.calendarAccounts} calendar connection(s)` +
+          (result.unreadable > 0
+            ? `; left ${result.unreadable} unreadable one(s) as they were`
+            : "") +
+          ".\nAll refresh tokens revoked — users must re-authenticate.\n" +
+          "A running server uses the new secret from now on.\n" +
+          (config.jwtSecretOverride !== null
+            ? "Set VS_JWT_SECRET to the new value before the server next starts.\n"
+            : ""),
       );
       break;
     }

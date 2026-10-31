@@ -22,7 +22,9 @@ const MIN_CLIENT_VERSION = "0.2.36";
 // calendar_links: sends a new Vetroscope event to every Google calendar the
 // person switched on, with this server owning each copy's state
 // (/user/calendar-links/*, /user/calendar-targets).
-const SERVER_FEATURES = ["calendar_links"];
+// settings_all_breakdowns: syncs the ignored_all_breakdowns setting, so a
+// desktop sends again the value it marked sent while this server dropped it.
+const SERVER_FEATURES = ["calendar_links", "settings_all_breakdowns"];
 
 export function buildServerInfoRoutes(config: Config): FastifyPluginAsync {
   return async (fastify) => {

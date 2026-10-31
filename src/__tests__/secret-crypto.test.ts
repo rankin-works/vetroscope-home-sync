@@ -51,9 +51,10 @@ describe("sync DEK wrapping", () => {
   });
 
   // The mirror of the above, and the reason the v1 path is worth keeping:
-  // legacy wraps are bound to the signing secret, so `vhs-cli
-  // rotate-jwt-secret` destroys them. Pinned here so the coupling is a
-  // documented property rather than a surprise.
+  // legacy wraps are bound to the signing secret, so a new secret can't
+  // read them and `vhs-cli rotate-jwt-secret` has to re-wrap them (see
+  // jwt-rotation.test.ts). Pinned here so the coupling is a documented
+  // property rather than a surprise.
   it("cannot read a legacy wrap once the JWT secret rotates", () => {
     const legacy = encryptSyncDek(DEK, JWT_SECRET);
     expect(() => decryptSyncDek(legacy, "rotated-secret")).toThrow();

@@ -47,8 +47,8 @@ export function buildAuthenticate(): preHandlerHookHandler {
     const row = request.server.db
       .prepare<
         [string],
-        { id: string; token_version: number }
-      >("SELECT id, token_version FROM users WHERE id = ?")
+        { id: string; token_version: number; role: Role }
+      >("SELECT id, token_version, role FROM users WHERE id = ?")
       .get(payload.sub);
     if (row === undefined) {
       return reply.status(401).send({ error: "user_not_found" });
@@ -77,7 +77,10 @@ export function buildAuthenticate(): preHandlerHookHandler {
       return reply.status(403).send({ error: "DEVICE_UNKNOWN" });
     }
 
-    request.authUser = payload;
+    // The role comes from the row, not the token: a demoted admin's access
+    // token still says admin until it's refreshed, and requireRole would
+    // otherwise let it create and revoke invites until then.
+    request.authUser = { ...payload, role: row.role };
     return undefined;
   };
 }

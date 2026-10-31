@@ -39,6 +39,9 @@ export async function issueTokens(
   jwtSecret: string,
   user: UserRow,
   deviceId: string,
+  // Refresh path: the presented token's hash, kept as a one-step grace
+  // predecessor (see below). Left out on login, register and setup.
+  keepTokenHash?: string,
 ): Promise<IssuedTokens> {
   const now = Math.floor(Date.now() / 1000);
   const payload: JWTPayload = {
@@ -63,10 +66,23 @@ export async function issueTokens(
     (now + REFRESH_TOKEN_EXPIRY_SECONDS) * 1000,
   ).toISOString();
 
+  // On refresh the presented token stays valid until its successor is
+  // used. A desktop whose refresh response never arrived (sleep, a Wi-Fi
+  // drop, a proxy timeout) still holds only the old token, and treats the
+  // 401 a strictly single-use token would give as a sign-out. Presenting any
+  // token purges every other token for the device, so at most two are live
+  // and a token two or more rotations old still gets a 401. Sign-ins start
+  // from a clean slate.
   const tx = db.transaction(() => {
-    db.prepare<[string, string]>(
-      "DELETE FROM refresh_tokens WHERE user_id = ? AND device_id = ?",
-    ).run(user.id, deviceId);
+    if (keepTokenHash !== undefined) {
+      db.prepare<[string, string, string]>(
+        "DELETE FROM refresh_tokens WHERE user_id = ? AND device_id = ? AND token_hash != ?",
+      ).run(user.id, deviceId, keepTokenHash);
+    } else {
+      db.prepare<[string, string]>(
+        "DELETE FROM refresh_tokens WHERE user_id = ? AND device_id = ?",
+      ).run(user.id, deviceId);
+    }
 
     db.prepare<[string, string, string, string, string]>(
       `INSERT INTO refresh_tokens (id, user_id, device_id, token_hash, expires_at)

@@ -37,6 +37,7 @@ import { createHash, randomBytes } from "node:crypto";
 
 import type { DB } from "../db.js";
 import { decryptSecret } from "./secret-crypto.js";
+import { nextSeqSql, raiseSeqFloors } from "./seq.js";
 
 export const PROVIDER = "google";
 export const CLAIM_MS = 5 * 60 * 1000;
@@ -95,7 +96,7 @@ export const CREATED_BY = new Set([
 const HOLDING = ["linked", "deleting", "removed_remote"];
 const KNOWN_PROVIDERS = new Set(["google", "outlook", "links"]);
 
-const NEXT_SEQ = "(SELECT COALESCE(MAX(seq), 0) + 1 FROM sync_marker_links)";
+const NEXT_SEQ = nextSeqSql("sync_marker_links");
 
 /** Columns a desktop pulls (and every call answers with), in pull order. */
 export const LINK_COLUMNS =
@@ -1266,6 +1267,9 @@ export function disconnectStart(
  *  refs, links mode and declared devices are settings and stay. The epoch
  *  tells the other desktops to drop their local rows and pull again. */
 export function resetLinks(db: DB, userId: string, now: string): void {
+  // The other desktops keep their link cursor until they see the epoch, so
+  // the numbers must not drop below it.
+  raiseSeqFloors(db, ["sync_marker_links"]);
   db.prepare("DELETE FROM sync_marker_links WHERE user_id = ?").run(userId);
   db.prepare(
     `UPDATE calendar_links_state

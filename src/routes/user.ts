@@ -5,7 +5,9 @@
 // profile shape the client reads and is pinned to false — Home Sync has no
 // billing plumbing.
 
-import type { FastifyPluginAsync } from "fastify";
+import { timingSafeEqual } from "node:crypto";
+
+import type { FastifyPluginAsync, FastifyReply } from "fastify";
 
 import {
   generateSalt,
@@ -16,6 +18,7 @@ import {
 import { listDeviceAliases, listDevices } from "../lib/device-service.js";
 import { issueTokens, MIN_PASSWORD_LENGTH } from "../lib/auth-service.js";
 import { encryptSyncDek, decryptSyncDek } from "../lib/secret-crypto.js";
+import { raiseSeqFloors } from "../lib/seq.js";
 import { buildRateLimiter } from "../middleware/ratelimit.js";
 import type { JWTPayload, UserRow } from "../types.js";
 
@@ -38,6 +41,46 @@ function e2eeWrapOf(row: SyncKeyRow): string | null {
   return row.sync_key_e2ee_wrap || row.encrypted_sync_key || null;
 }
 
+// A stored key is only replaced on purpose. A desktop that couldn't unlock
+// (a dropped connection, a rate limit, a server error) and then set up
+// encryption again sent a new key, and the account ended up with two: the
+// computers on the old key couldn't read rows written under the new one, and
+// the other way round. Calls that mean to replace the key (turning
+// end-to-end encryption on or off, a new recovery code, a new key) say so
+// with `rekey: true`; anything else that would store a different key gets
+// a 409 and should unlock with the stored one instead.
+function keyMismatch(reply: FastifyReply) {
+  return reply.status(409).send({
+    error: "sync_key_mismatch",
+    code: "sync_key_mismatch",
+    message:
+      "This account already has a different encryption key. Unlock with it, or replace it on purpose.",
+  });
+}
+
+// Whether the stored server wrap holds `dek`. A wrap this server can't open
+// (the JWT secret or VS_SYNC_DEK_KEK changed under it) unlocks nothing for
+// anyone, so it doesn't count as a different key: a computer that still has
+// the key replaces it, which is the only way such an account gets its
+// sign-in recovery back. Desktops that can't unlock show a retry rather
+// than making a new key, so this isn't a way for a second key to appear.
+function serverWrapClashes(
+  wrap: string,
+  dek: string,
+  jwtSecret: string,
+  kek: string | null,
+): boolean {
+  let stored: string;
+  try {
+    stored = decryptSyncDek(wrap, jwtSecret, kek);
+  } catch {
+    return false;
+  }
+  const a = Buffer.from(stored.toLowerCase(), "utf8");
+  const b = Buffer.from(dek.toLowerCase(), "utf8");
+  return !(a.length === b.length && timingSafeEqual(a, b));
+}
+
 interface UpdateProfileBody {
   display_name?: string;
 }
@@ -49,6 +92,7 @@ interface ChangePasswordBody {
 
 interface SyncKeyBody {
   encrypted_sync_key?: string;
+  rekey?: boolean;
 }
 
 interface DeleteAccountBody {
@@ -293,6 +337,8 @@ export const userRoutes: FastifyPluginAsync = async (fastify) => {
           message: "encrypted_sync_key is required.",
         });
       }
+      // Not checked against the stored key: only desktops from before the
+      // dual-wrap routes use this one, and they never send `rekey`.
       try {
         fastify.db
           .prepare<[string, string, string]>(
@@ -358,7 +404,7 @@ export const userRoutes: FastifyPluginAsync = async (fastify) => {
     });
   });
 
-  fastify.put<{ Body: { encryption_key?: string } }>(
+  fastify.put<{ Body: { encryption_key?: string; rekey?: boolean } }>(
     "/user/sync-key/server",
     async (request, reply) => {
       const auth = request.authUser as JWTPayload;
@@ -387,6 +433,18 @@ export const userRoutes: FastifyPluginAsync = async (fastify) => {
             "End-to-end encryption is enabled; disable it before using sign-in recovery.",
         });
       }
+      if (
+        request.body?.rekey !== true &&
+        row.sync_key_server_wrap &&
+        serverWrapClashes(
+          row.sync_key_server_wrap,
+          dek,
+          fastify.jwtSecret,
+          fastify.config.syncDekKek,
+        )
+      ) {
+        return keyMismatch(reply);
+      }
       const wrap = encryptSyncDek(
         dek,
         fastify.jwtSecret,
@@ -405,7 +463,9 @@ export const userRoutes: FastifyPluginAsync = async (fastify) => {
     },
   );
 
-  fastify.put<{ Body: { e2ee_wrap?: string; encrypted_sync_key?: string } }>(
+  fastify.put<{
+    Body: { e2ee_wrap?: string; encrypted_sync_key?: string; rekey?: boolean };
+  }>(
     "/user/sync-key/e2ee",
     async (request, reply) => {
       const auth = request.authUser as JWTPayload;
@@ -419,6 +479,26 @@ export const userRoutes: FastifyPluginAsync = async (fastify) => {
           error: "invalid_request",
           message: "e2ee_wrap is required.",
         });
+      }
+      // A recovery wrap can't be opened here, and every new recovery code
+      // makes a new wrap. Released desktops change the recovery code and turn
+      // end-to-end encryption back on without knowing about `rekey`, so only
+      // a caller that says rekey: false is refused a different wrap
+      // (keyMismatch). That only matters while the recovery wrap is how
+      // computers unlock: in sign-in recovery mode the server wrap is, and
+      // one left from before end-to-end encryption was turned off can be
+      // replaced freely.
+      if (request.body?.rekey === false) {
+        const row = fastify.db
+          .prepare<[string], SyncKeyRow>(
+            `SELECT encrypted_sync_key, sync_key_server_wrap, sync_key_e2ee_wrap, encryption_mode
+             FROM users WHERE id = ?`,
+          )
+          .get(auth.sub);
+        const stored = row ? e2eeWrapOf(row) : null;
+        const unlockPath =
+          !!row && (normalizeMode(row) === "e2ee" || !row.sync_key_server_wrap);
+        if (stored && unlockPath && stored !== wrap) return keyMismatch(reply);
       }
       fastify.db
         .prepare<[string, string, string]>(
@@ -463,7 +543,9 @@ export const userRoutes: FastifyPluginAsync = async (fastify) => {
     return reply.send({ ok: true, mode: "e2ee" });
   });
 
-  fastify.post<{ Body: { encryption_key?: string; keep_e2ee_wrap?: boolean } }>(
+  fastify.post<{
+    Body: { encryption_key?: string; keep_e2ee_wrap?: boolean; rekey?: boolean };
+  }>(
     "/user/sync-key/disable-e2ee",
     async (request, reply) => {
       const auth = request.authUser as JWTPayload;
@@ -473,6 +555,26 @@ export const userRoutes: FastifyPluginAsync = async (fastify) => {
           error: "invalid_request",
           message: "encryption_key must be 64 hex chars.",
         });
+      }
+      // Turning end-to-end encryption off keeps the key. A server wrap left
+      // from before must hold the same one (keyMismatch).
+      if (request.body?.rekey !== true) {
+        const row = fastify.db
+          .prepare<[string], { sync_key_server_wrap: string | null }>(
+            "SELECT sync_key_server_wrap FROM users WHERE id = ?",
+          )
+          .get(auth.sub);
+        if (
+          row?.sync_key_server_wrap &&
+          serverWrapClashes(
+            row.sync_key_server_wrap,
+            dek,
+            fastify.jwtSecret,
+            fastify.config.syncDekKek,
+          )
+        ) {
+          return keyMismatch(reply);
+        }
       }
       const wrap = encryptSyncDek(
         dek,
@@ -598,9 +700,14 @@ export const userRoutes: FastifyPluginAsync = async (fastify) => {
       }
 
       // CASCADE covers devices, refresh_tokens, sync_*, password_resets.
-      fastify.db
-        .prepare<[string]>("DELETE FROM users WHERE id = ?")
-        .run(auth.sub);
+      // The sync rows go with it, so the seq floors are raised first: the
+      // other accounts' cursors may be at numbers this account's rows held.
+      fastify.db.transaction(() => {
+        raiseSeqFloors(fastify.db);
+        fastify.db
+          .prepare<[string]>("DELETE FROM users WHERE id = ?")
+          .run(auth.sub);
+      })();
       return reply.send({ ok: true });
     },
   );

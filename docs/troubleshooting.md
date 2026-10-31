@@ -140,7 +140,35 @@ docker exec vetroscope-home-sync vhs-cli rotate-jwt-secret --confirm
 ```
 
 This invalidates every active session across every device. Users
-will have to sign in again. Refresh tokens are wiped too.
+will have to sign in again. Refresh tokens are wiped too. The running
+server switches to the new secret at once; no restart is needed. If
+you pin the secret with `VS_JWT_SECRET`, this plain form refuses to
+run: use the steps further down instead.
+
+Unless `VS_SYNC_DEK_KEK` is set, the key that protects each user's
+sign-in recovery copy of their encryption key is derived from the JWT
+secret, and so is the key for connected Google Calendar accounts. The
+command opens all of them with the old secret and wraps them again
+with the new one, in one step. If any of them can't be opened (for
+example after the secret was changed some other way), it changes
+nothing and says so; `--allow-unreadable` rotates anyway and leaves
+those as they are.
+
+**Don't change `VS_JWT_SECRET` to rotate.** Once any of those keys
+exist, a server that finds a different `VS_JWT_SECRET` than the one it
+uses refuses to start, because switching the secret under them would
+make every user's encryption key and calendar connection unreadable,
+and a user whose computers have all lost the key would lose their
+synced history. If you pin the secret with `VS_JWT_SECRET`:
+
+1. Keep the current value in place and the server running.
+2. Rotate to your new value, read from stdin:
+   `echo "$NEW_SECRET" | docker exec -i vetroscope-home-sync vhs-cli rotate-jwt-secret --confirm --secret -`
+3. Set `VS_JWT_SECRET` to the new value and recreate the container
+   (`docker compose up -d`).
+
+If the server already refuses to start, put the previous value back
+first, then follow the steps above.
 
 ## Upgrading the container
 

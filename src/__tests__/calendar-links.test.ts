@@ -1063,7 +1063,7 @@ describe("gates", () => {
 
   it("/server-info lists calendar_links", async () => {
     const res = await h.app.inject({ method: "GET", url: "/server-info" });
-    expect(res.json().features).toEqual(["calendar_links"]);
+    expect(res.json().features).toContain("calendar_links");
   });
 });
 

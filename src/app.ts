@@ -105,7 +105,17 @@ export async function buildApp({
 
   app.decorate("db", db);
   app.decorate("config", config);
-  app.decorate("jwtSecret", jwtSecret);
+  // Read from server_state on every use, not kept from boot:
+  // `vhs-cli rotate-jwt-secret` changes it while the server runs, and a
+  // calendar connection or sign-in recovery wrap sealed afterwards with the
+  // old one would be unreadable once the server restarted. Sessions signed
+  // with the old secret stop working at once, which rotating means anyway.
+  const readJwtSecret = db.prepare<[], { value: string }>(
+    "SELECT value FROM server_state WHERE key = 'jwt_secret'",
+  );
+  app.decorate("jwtSecret", {
+    getter: () => readJwtSecret.get()?.value ?? jwtSecret,
+  });
   app.decorate("authenticate", buildAuthenticate());
   app.decorate("requireAdmin", requireRole("admin"));
 

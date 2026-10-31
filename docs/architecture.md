@@ -50,7 +50,7 @@ Docker image but never touches the data; there are no webhooks, no telemetry rou
 | Runtime | Node.js 20+ | Same runtime the desktop client already ships, so the sync payload types are shared vocabulary rather than a translation layer. Mature ecosystem, and one language across the project keeps the maintenance burden small. |
 | DB | SQLite via `better-sqlite3` | Matches the local client's `node:sqlite` semantics. Single file, easy to back up, fits on any hardware from a Pi to a NAS. |
 | HTTP | Fastify | Fast, low-ceremony, first-class TypeScript types. Alternative: bare Node `http` — rejected because we want structured logging + validation hooks. |
-| Auth | JWT (HS256) | Symmetric secret generated on first boot. Tokens signed by the server; validated by each request handler. Refresh tokens live in a `refresh_tokens` table and rotate on every use. |
+| Auth | JWT (HS256) | Symmetric secret generated on first boot. Tokens signed by the server; validated by each request handler. Refresh tokens live in a `refresh_tokens` table and rotate on every use; the token just used stays valid until its successor is used, so a refresh whose response was lost can be retried. |
 | Password hashing | PBKDF2 via WebCrypto | Available in the standard runtime with no native dependency. The stored format is fixed by the rows already on disk — see the note in `src/lib/crypto.ts` before changing any parameter. |
 | TLS | Caddy or `node:https` with user-provided cert | Default Docker Compose file pairs the app with a Caddy sidecar for automatic Let's Encrypt. Users who only expose over LAN can either skip TLS (HTTP is fine over a trusted network) or generate a self-signed cert. |
 
@@ -336,9 +336,9 @@ services:
 | `VS_DATA_DIR` | `/data` | Where the SQLite DB, backups, and logs live |
 | `VS_PORT` | `4437` | HTTP(S) listen port. `4437` picked because it's unassigned by IANA |
 | `VS_SERVER_NAME` | hostname | Friendly name shown in the client |
-| `VS_JWT_SECRET` | auto-generated | Persisted in `server_state` after first boot |
+| `VS_JWT_SECRET` | auto-generated | Persisted in `server_state` after first boot. Changing it later is refused at startup once sign-in recovery wraps (without `VS_SYNC_DEK_KEK`) or Google Calendar accounts exist, since they'd become unreadable; rotate with `vhs-cli rotate-jwt-secret --secret -` instead (see troubleshooting). |
 | `VS_TRUST_PROXY` | `false` | Whether to believe `X-Forwarded-For` when deciding a client's address. **Set this if a reverse proxy sits in front of the container** — otherwise every client looks like the proxy and they all share one rate-limit bucket. **Leave it off if the server is reachable directly**: the header is trivially forged, and trusting it lets a caller mint a fresh rate-limit bucket per request, removing the cap on password and setup-code guessing. Accepts `true`, a hop count (`1`), or a comma-separated address/CIDR allowlist. |
-| `VS_SYNC_DEK_KEK` | unset | Optional 32-byte key (64 hex chars or base64) used to wrap sync data-encryption keys for sign-in recovery. When unset, the wrapping key is derived from the JWT secret, which means `vhs-cli rotate-jwt-secret` renders existing wraps unreadable. Setting it decouples the two. Wraps written before it was set stay readable; new wraps are tagged `v2:` and require the KEK. **Losing this value after wraps exist makes sign-in recovery unrecoverable** — back it up with the same care as the database. Generate with `openssl rand -hex 32`. |
+| `VS_SYNC_DEK_KEK` | unset | Optional 32-byte key (64 hex chars or base64) used to wrap sync data-encryption keys for sign-in recovery. When unset, the wrapping key is derived from the JWT secret, so `vhs-cli rotate-jwt-secret` has to re-wrap every existing wrap (it does, using the old secret). Setting it decouples the two. Wraps written before it was set stay readable; new wraps are tagged `v2:` and require the KEK. **Losing this value after wraps exist makes sign-in recovery unrecoverable** — back it up with the same care as the database. Generate with `openssl rand -hex 32`. |
 | `VS_TLS_CERT`, `VS_TLS_KEY` | unset | Paths to PEM files. If both set, server listens over HTTPS instead of HTTP. |
 | `VS_MAX_DEVICES_PER_USER` | `10` | Per-user device cap. Higher default than cloud's 5 since it's your server. |
 | `VS_ALLOW_REGISTRATION` | `invite` | `open` (anyone can register), `invite` (only via invite token), `closed` (only the admin can add users via CLI) |
@@ -386,8 +386,10 @@ In order of severity:
    `src/__tests__/tenant-isolation.test.ts`, one case per uuid-keyed
    table. Invite tokens are single-use with a 24h TTL.
 4. **Attacker who steals a refresh token** — Mitigation: tokens rotate on
-   each refresh and the consumed row is deleted, so a replayed token is
-   rejected.
+   each refresh. The token just used stays valid only until its successor
+   is used (so a desktop whose refresh response was lost can retry), and
+   using either one deletes every other token for the device, so a token
+   two or more rotations old is rejected.
 5. **Attacker who steals an access token** — Mitigation: 1h expiry, and a
    password change bumps `users.token_version`, which invalidates every
    outstanding access token for that account on its next request rather
@@ -429,7 +431,11 @@ sees a forwarded header it has been told to ignore.
 
 - JWT secret: generated via `crypto.randomBytes(32)` on first boot,
   persisted to `server_state.jwt_secret`. Rotating it requires a CLI
-  command (invalidates all active tokens).
+  command (`vhs-cli rotate-jwt-secret`), which invalidates all active
+  tokens and re-wraps everything wrapped with a key derived from the
+  secret (sign-in recovery wraps without `VS_SYNC_DEK_KEK`, and the
+  Google Calendar accounts). Changing `VS_JWT_SECRET` instead is refused
+  at startup once any of those exist.
 - Setup token: 12-char base32, hashed with PBKDF2 before storing.
   Consumed on successful setup.
 - Invite tokens: same shape, hashed, TTL-bound.
